@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
 import { typeormConfig } from './database/typeorm.config';
-import { User, Category, Product, Customer, Order, OrderItem, Store, Employee, RefreshToken, RestaurantTable } from './entities';
+import { User, Category, Product, Customer, Order, OrderItem, Store, Employee, RefreshToken, RestaurantTable, Expense, ExpenseCategory } from './entities';
 import { AuthModule } from './auth/auth.module';
 import { CommonModule } from './common/common.module';
 import { AppController } from './app.controller';
@@ -15,6 +15,7 @@ import { StoresModule } from './modules/stores/stores.module';
 import { UsersModule } from './modules/users/users.module';
 import { EmployeesModule } from './modules/employees/employees.module';
 import { RestaurantModule } from './modules/restaurant/restaurant.module';
+import { ExpensesModule } from './modules/expenses/expenses.module';
 import { RealtimeModule } from './realtime/realtime.module';
 
 @Module({
@@ -24,7 +25,7 @@ import { RealtimeModule } from './realtime/realtime.module';
       envFilePath: '.env',
     }),
     TypeOrmModule.forRoot(typeormConfig()),
-    TypeOrmModule.forFeature([User, Category, Product, Customer, Order, OrderItem, Store, Employee, RefreshToken, RestaurantTable]),
+    TypeOrmModule.forFeature([User, Category, Product, Customer, Order, OrderItem, Store, Employee, RefreshToken, RestaurantTable, Expense, ExpenseCategory]),
     CommonModule,
     AuthModule,
     ProductsModule,
@@ -37,6 +38,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     EmployeesModule,
     RealtimeModule,
     RestaurantModule,
+    ExpensesModule,
   ],
   controllers: [AppController],
   providers: [],

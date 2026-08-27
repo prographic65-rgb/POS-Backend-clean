@@ -11,6 +11,16 @@ export const DEFAULT_PAGE_SIZE = 20;
 export const MAX_PAGE_SIZE = 200;
 
 /**
+ * Ceiling for catalogue endpoints (active products, categories).
+ *
+ * These feed PICKERS — the POS grid and the waiter's menu — which must show
+ * the complete catalogue, not a page of it. Capping them at MAX_PAGE_SIZE
+ * would silently hide items once a menu passes 200, with no pager to reach
+ * them. Still bounded, so a runaway request cannot dump an unbounded table.
+ */
+export const MAX_CATALOGUE_SIZE = 2000;
+
+/**
  * Normalises `skip`/`take` query params.
  *
  * They arrive as STRINGS: the global ValidationPipe in main.ts is created
@@ -60,6 +70,7 @@ export function toPage<T>(items: T[], total: number, skip: number, take: number)
 export function parseOptionalPaging(
   skip: unknown,
   take: unknown,
+  maxTake = MAX_PAGE_SIZE,
 ): { skip?: number; take?: number } {
   const parsedSkip = Number(skip);
   const parsedTake = Number(take);
@@ -68,7 +79,7 @@ export function parseOptionalPaging(
     skip: Number.isFinite(parsedSkip) && parsedSkip > 0 ? Math.floor(parsedSkip) : undefined,
     take:
       Number.isFinite(parsedTake) && parsedTake > 0
-        ? Math.min(Math.floor(parsedTake), MAX_PAGE_SIZE)
+        ? Math.min(Math.floor(parsedTake), maxTake)
         : undefined,
   };
 }

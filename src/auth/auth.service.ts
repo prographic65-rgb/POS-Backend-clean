@@ -6,6 +6,7 @@ import * as bcrypt from 'bcrypt';
 import { User, Store, Employee } from '../entities';
 import { RefreshTokenService } from './refresh-token.service';
 import { resolveEffectiveRole } from '../common/roles';
+import { resolvePermissions } from '../common/permissions';
 
 @Injectable()
 export class AuthService {
@@ -36,6 +37,7 @@ export class AuthService {
     let accountType: string | undefined;
     let designation: string | undefined;
     let printerName: string | undefined;
+    let storedPermissions: string[] | null = null;
 
     if (user.role === 'store_owner') {
       const store = await this.storesRepository.findOne({ where: { userId: user.id } });
@@ -48,6 +50,7 @@ export class AuthService {
       storeId = employee?.storeId;
       designation = employee?.designation;
       printerName = employee?.printerName;
+      storedPermissions = employee?.permissions ?? null;
       if (storeId) {
         const store = await this.storesRepository.findOne({ where: { id: storeId } });
         currency = store?.currency;
@@ -72,6 +75,20 @@ export class AuthService {
       // Additive. `role` above is untouched, so existing clients that branch
       // on it keep behaving exactly as before.
       effectiveRole: resolveEffectiveRole({ role: user.role, accountType, designation }),
+      /**
+       * The modules this user may open. Derived, never read straight from the
+       * column: owners get everything their account type has, and a staff
+       * member's stored set is re-filtered against their current designation.
+       *
+       * This object becomes `req.user`, so the guards downstream see the raw
+       * `permissions` too and recompute rather than trusting this field.
+       */
+      permissions: resolvePermissions({
+        role: user.role,
+        accountType,
+        designation,
+        permissions: storedPermissions,
+      }),
     };
   }
 

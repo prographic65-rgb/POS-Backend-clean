@@ -201,13 +201,23 @@ export class OrdersService {
     return await this.ordersRepository.save(updated);
   }
 
+  /**
+   * Settles an order with a targeted UPDATE rather than saving the aggregate.
+   *
+   * `save()` on a loaded Order re-persists its eagerly-loaded, cascading
+   * `items` and bumps the @VersionColumn — so a two-field status change turned
+   * into a write of every order line plus an optimistic-lock check that could
+   * reject the update outright. Only the two columns that actually change are
+   * written now; findOne() still enforces the tenancy check first.
+   */
   async markAsPaid(id: string, storeId?: string, paymentMethod?: string): Promise<Order> {
-    const order = await this.findOne(id, storeId);
-    order.status = 'paid';
-    if (paymentMethod) {
-      order.paymentMethod = paymentMethod as any;
-    }
-    return await this.ordersRepository.save(order);
+    await this.findOne(id, storeId);
+
+    const patch: Partial<Order> = { status: 'paid' };
+    if (paymentMethod) patch.paymentMethod = paymentMethod as any;
+
+    await this.ordersRepository.update({ id }, patch);
+    return this.findOne(id, storeId);
   }
 
   async remove(id: string, storeId?: string): Promise<void> {

@@ -27,13 +27,26 @@ export class CustomersService {
     });
   }
 
-  async findAllPaged(skip: number, take: number): Promise<Page<Customer>> {
-    const [items, total] = await this.customersRepository.findAndCount({
-      relations: ['orders'],
-      order: { createdAt: 'DESC' },
-      skip,
-      take,
-    });
+  async findAllPaged(skip: number, take: number, search?: string): Promise<Page<Customer>> {
+    const qb = this.customersRepository
+      .createQueryBuilder('customer')
+      .leftJoinAndSelect('customer.orders', 'orders')
+      .orderBy('customer.createdAt', 'DESC')
+      .skip(skip)
+      .take(take);
+
+    const term = search?.trim();
+    if (term) {
+      qb.andWhere(
+        `("customer"."name" ILIKE :term
+          OR COALESCE("customer"."email", '') ILIKE :term
+          OR COALESCE("customer"."phone", '') ILIKE :term
+          OR COALESCE("customer"."city", '') ILIKE :term)`,
+        { term: `%${term}%` },
+      );
+    }
+
+    const [items, total] = await qb.getManyAndCount();
     return toPage(items, total, skip, take);
   }
 

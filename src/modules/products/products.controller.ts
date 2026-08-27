@@ -19,7 +19,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Store, Employee } from '../../entities';
 import { Request } from 'express';
-import { parsePaging, parseOptionalPaging, wantsCount } from '@/common';
+import { parsePaging, parseOptionalPaging, wantsCount, MAX_CATALOGUE_SIZE } from '@/common';
 
 @ApiTags('Products')
 @Controller('products')
@@ -66,13 +66,14 @@ export class ProductsController {
     @Query('skip') skip?: string,
     @Query('take') take?: string,
     @Query('withCount') withCount?: string,
+    @Query('search') search?: string,
   ) {
     if (!storeId) throw new BadRequestException('storeId query parameter is required');
 
     // Opt-in envelope so existing callers keep receiving a bare array.
     if (wantsCount(withCount)) {
       const paging = parsePaging(skip, take);
-      return this.productsService.findAllPaged(storeId, paging.skip, paging.take);
+      return this.productsService.findAllPaged(storeId, paging.skip, paging.take, search);
     }
     const paging = parseOptionalPaging(skip, take);
     return this.productsService.findAll(storeId, paging.skip, paging.take);
@@ -85,10 +86,16 @@ export class ProductsController {
   @ApiQuery({ name: 'skip', required: false, type: Number })
   @ApiQuery({ name: 'take', required: false, type: Number })
   @ApiResponse({ status: 200, description: 'List of products' })
-  findActive(@Query('storeId') storeId?: string, @Query('skip') skip?: number, @Query('take') take?: number) {
-    console.log(`Received request to find active products with storeId=${storeId}, skip=${skip}, take=${take}`);
+  findActive(
+    @Query('storeId') storeId?: string,
+    @Query('skip') skip?: string,
+    @Query('take') take?: string,
+  ) {
     if (!storeId) throw new BadRequestException('storeId query parameter is required');
-    return this.productsService.findActive(storeId, skip, take);
+    // Query params arrive as STRINGS (the global ValidationPipe has no
+    // `transform`), and were previously handed to TypeORM's skip/take raw.
+    const paging = parseOptionalPaging(skip, take, MAX_CATALOGUE_SIZE);
+    return this.productsService.findActive(storeId, paging.skip, paging.take);
   }
 
   @Get(':id')

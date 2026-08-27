@@ -27,14 +27,34 @@ export class ProductsService {
   }
 
   /** Paged variant. `findAndCount` gives the total without a second query. */
-  async findAllPaged(storeId: string, skip: number, take: number): Promise<Page<Product>> {
-    const [items, total] = await this.productsRepository.findAndCount({
-      where: { storeId },
-      relations: ['category'],
-      order: { createdAt: 'DESC' },
-      skip,
-      take,
-    });
+  async findAllPaged(
+    storeId: string,
+    skip: number,
+    take: number,
+    search?: string,
+  ): Promise<Page<Product>> {
+    const qb = this.productsRepository
+      .createQueryBuilder('product')
+      .leftJoinAndSelect('product.category', 'category')
+      .where('product.storeId = :storeId', { storeId })
+      .orderBy('product.createdAt', 'DESC')
+      .skip(skip)
+      .take(take);
+
+    // Searched in SQL, not on the loaded page — a paged list filtered
+    // client-side would silently miss matches on other pages.
+    const term = search?.trim();
+    if (term) {
+      qb.andWhere(
+        `("product"."name" ILIKE :term
+          OR COALESCE("product"."sku", '') ILIKE :term
+          OR COALESCE("product"."barcode", '') ILIKE :term
+          OR COALESCE("category"."name", '') ILIKE :term)`,
+        { term: `%${term}%` },
+      );
+    }
+
+    const [items, total] = await qb.getManyAndCount();
     return toPage(items, total, skip, take);
   }
 

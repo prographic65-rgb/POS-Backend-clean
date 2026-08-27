@@ -1,4 +1,4 @@
-import { IsString, IsEmail, IsOptional, MinLength, IsDecimal, IsBoolean, IsDateString } from 'class-validator';
+import { IsString, IsEmail, IsOptional, MinLength, IsDecimal, IsBoolean, IsDateString, IsArray } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateEmployeeDto {
@@ -119,4 +119,25 @@ export class UpdateEmployeeDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+}
+
+/**
+ * Owner-only: replaces an employee's granted modules wholesale.
+ *
+ * A PUT-like replacement rather than add/remove verbs, because the UI is a set
+ * of checkboxes — sending the whole set is what makes unticking work without a
+ * second endpoint.
+ */
+export class UpdatePermissionsDto {
+  @ApiProperty({
+    type: [String],
+    example: ['dashboard', 'expenses'],
+    description:
+      'Modules to grant on top of the module the designation always carries. ' +
+      'Entries the designation does not allow are dropped rather than rejected, ' +
+      'so a client built against an older module list still saves cleanly.',
+  })
+  @IsArray()
+  @IsString({ each: true })
+  permissions: string[];
 }

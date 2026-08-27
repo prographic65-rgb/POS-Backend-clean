@@ -75,6 +75,22 @@ export class Employee {
   @Column({ type: 'varchar', length: 255, nullable: true })
   printerName?: string;
 
+  /**
+   * Extra modules this employee has been granted, on top of the one their
+   * designation always carries (a cashier's till, the kitchen display, the
+   * waiter's tables).
+   *
+   * NULL means "never customised" and is not the same as `[]` — although both
+   * currently resolve to base-only access, keeping them distinct lets the UI
+   * show whether an owner has actually reviewed this person's access.
+   *
+   * Never trusted as-is: resolvePermissions() re-filters it against what the
+   * current designation allows, so a stale entry left behind by a role change
+   * cannot grant anything.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  permissions?: string[] | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

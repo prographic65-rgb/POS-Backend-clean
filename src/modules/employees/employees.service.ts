@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Employee, RESTAURANT_DESIGNATIONS } from '@/entities';
 import { User } from '@/entities';
-import { TenantService, toPage, type Page } from '@/common';
+import { TenantService, toPage, sanitizePermissions, grantablePermissionsFor, basePermissionFor, resolvePermissions, type Page } from '@/common';
 import { CreateEmployeeDto, UpdateEmployeeDto } from './dto';
 import * as bcrypt from 'bcrypt';
 
@@ -27,14 +27,34 @@ export class EmployeesService {
     });
   }
 
-  async findAllPaged(storeId: string, skip: number, take: number): Promise<Page<Employee>> {
-    const [items, total] = await this.employeesRepository.findAndCount({
-      where: { storeId },
-      skip,
-      take,
-      order: { createdAt: 'DESC' },
-      relations: ['user', 'store'],
-    });
+  async findAllPaged(
+    storeId: string,
+    skip: number,
+    take: number,
+    search?: string,
+  ): Promise<Page<Employee>> {
+    const qb = this.employeesRepository
+      .createQueryBuilder('employee')
+      .leftJoinAndSelect('employee.user', 'user')
+      .leftJoinAndSelect('employee.store', 'store')
+      .where('employee.storeId = :storeId', { storeId })
+      .orderBy('employee.createdAt', 'DESC')
+      .skip(skip)
+      .take(take);
+
+    const term = search?.trim();
+    if (term) {
+      qb.andWhere(
+        `("employee"."name" ILIKE :term
+          OR COALESCE("employee"."email", '') ILIKE :term
+          OR COALESCE("employee"."phone", '') ILIKE :term
+          OR COALESCE("employee"."designation", '') ILIKE :term
+          OR COALESCE("employee"."employeeId", '') ILIKE :term)`,
+        { term: `%${term}%` },
+      );
+    }
+
+    const [items, total] = await qb.getManyAndCount();
     return toPage(items, total, skip, take);
   }
 
@@ -45,13 +65,38 @@ export class EmployeesService {
    * one employees request per store, holding the whole platform in memory to
    * render one page.
    */
-  async findAllAcrossStoresPaged(skip: number, take: number): Promise<Page<Employee>> {
-    const [items, total] = await this.employeesRepository.findAndCount({
-      skip,
-      take,
-      order: { createdAt: 'DESC' },
-      relations: ['user', 'store'],
-    });
+  async findAllAcrossStoresPaged(
+    skip: number,
+    take: number,
+    search?: string,
+    storeId?: string,
+  ): Promise<Page<Employee>> {
+    const qb = this.employeesRepository
+      .createQueryBuilder('employee')
+      .leftJoinAndSelect('employee.user', 'user')
+      .leftJoinAndSelect('employee.store', 'store')
+      .orderBy('employee.createdAt', 'DESC')
+      .skip(skip)
+      .take(take);
+
+    // Both filters run in SQL: applied to the loaded page instead, they would
+    // hide every match that happens to sit on another page.
+    if (storeId) {
+      qb.andWhere('employee.storeId = :storeId', { storeId });
+    }
+
+    const term = search?.trim();
+    if (term) {
+      qb.andWhere(
+        `("employee"."name" ILIKE :term
+          OR COALESCE("employee"."email", '') ILIKE :term
+          OR COALESCE("employee"."employeeId", '') ILIKE :term
+          OR COALESCE("store"."name", '') ILIKE :term)`,
+        { term: `%${term}%` },
+      );
+    }
+
+    const [items, total] = await qb.getManyAndCount();
     return toPage(items, total, skip, take);
   }
 
@@ -177,7 +222,80 @@ export class EmployeesService {
     const { password, isActive, ...updateData } = updateEmployeeDto;
 
     Object.assign(employee, updateData);
+
+    // Re-narrow the granted modules against the (possibly new) designation.
+    // Promoting a waiter to cashier, or demoting one, must not leave modules
+    // behind that the new role could never have been given.
+    if (updateEmployeeDto.designation !== undefined && employee.permissions?.length) {
+      const store = await this.tenantService.getStore(employee.storeId);
+      employee.permissions = sanitizePermissions(
+        store.accountType,
+        employee.designation,
+        employee.permissions,
+      );
+    }
+
     return await this.employeesRepository.save(employee);
+  }
+
+  /**
+   * Replaces an employee's granted modules.
+   *
+   * The submitted list is narrowed to what the designation actually allows —
+   * a kitchen hand cannot be handed the till by editing the request body — and
+   * the base module is not stored, because resolvePermissions() always grants
+   * it and persisting it would carry a stale base through a role change.
+   */
+  async setPermissions(id: string, permissions: string[]) {
+    const employee = await this.employeesRepository.findOne({ where: { id } });
+    if (!employee) {
+      throw new BadRequestException(`Employee with ID ${id} not found`);
+    }
+
+    const store = await this.tenantService.getStore(employee.storeId);
+
+    employee.permissions = sanitizePermissions(
+      store.accountType,
+      employee.designation,
+      permissions,
+    );
+
+    await this.employeesRepository.save(employee);
+    return this.describePermissions(employee, store.accountType);
+  }
+
+  /**
+   * What this employee currently holds and what may still be ticked on.
+   *
+   * The grantable set is returned alongside so the client never has to
+   * hard-code the designation rules — it renders whatever the server says is
+   * available, and a change here reaches every client without a release.
+   */
+  async getPermissions(id: string) {
+    const employee = await this.employeesRepository.findOne({ where: { id } });
+    if (!employee) {
+      throw new BadRequestException(`Employee with ID ${id} not found`);
+    }
+    const store = await this.tenantService.getStore(employee.storeId);
+    return this.describePermissions(employee, store.accountType);
+  }
+
+  private describePermissions(employee: Employee, accountType: string) {
+    return {
+      employeeId: employee.id,
+      designation: employee.designation,
+      /** Always held; shown ticked and disabled. */
+      base: basePermissionFor(accountType, employee.designation),
+      /** What the owner may additionally assign. */
+      grantable: grantablePermissionsFor(accountType, employee.designation),
+      /** Base + granted, i.e. what this person can actually open. */
+      permissions: resolvePermissions({
+        role: 'employee',
+        accountType,
+        designation: employee.designation,
+        permissions: employee.permissions,
+      }),
+    };
   }
 
   async delete(id: string) {

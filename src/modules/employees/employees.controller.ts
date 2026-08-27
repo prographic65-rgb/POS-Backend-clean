@@ -12,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { EmployeesService } from './employees.service';
-import { CreateEmployeeDto, UpdateEmployeeDto } from './dto';
+import { CreateEmployeeDto, UpdateEmployeeDto, UpdatePermissionsDto } from './dto';
 import { JwtAuthGuard } from '@/auth/jwt-auth.guard';
 import { Roles, RolesGuard, CurrentUser, TenantService, parsePaging, wantsCount } from '@/common';
 
@@ -32,9 +32,13 @@ export class EmployeesController {
   async listAll(
     @Query('skip') skip?: string,
     @Query('take') take?: string,
+    @Query('search') search?: string,
+    @Query('storeId') storeId?: string,
   ) {
     const paging = parsePaging(skip, take);
-    return this.employeesService.findAllAcrossStoresPaged(paging.skip, paging.take);
+    return this.employeesService.findAllAcrossStoresPaged(
+      paging.skip, paging.take, search, storeId,
+    );
   }
 
   @Get('store/:storeId')
@@ -47,6 +51,7 @@ export class EmployeesController {
     @Query('skip') skip?: string,
     @Query('take') take?: string,
     @Query('withCount') withCount?: string,
+    @Query('search') search?: string,
   ) {
     // storeId is a route param, so it must be checked against the caller
     // rather than trusted.
@@ -54,7 +59,7 @@ export class EmployeesController {
 
     const paging = parsePaging(skip, take, 10);
     if (wantsCount(withCount)) {
-      return this.employeesService.findAllPaged(storeId, paging.skip, paging.take);
+      return this.employeesService.findAllPaged(storeId, paging.skip, paging.take, search);
     }
     return this.employeesService.findAll(storeId, paging.skip, paging.take);
   }
@@ -99,6 +104,38 @@ export class EmployeesController {
       await this.tenantService.assertStoreAccess(user, employee.storeId);
     }
     return this.employeesService.update(id, updateEmployeeDto);
+  }
+
+  @Get(':id/permissions')
+  @Roles('super_admin', 'store_owner', 'restaurant_owner')
+  @ApiOperation({ summary: "An employee's granted modules and what else may be assigned" })
+  async getPermissions(@Param('id') id: string, @CurrentUser() user: any) {
+    const employee = await this.employeesService.findOne(id);
+    if (employee) {
+      await this.tenantService.assertStoreAccess(user, employee.storeId);
+    }
+    return this.employeesService.getPermissions(id);
+  }
+
+  /**
+   * Owner-only by design: @Roles here is the whole point of the feature.
+   * Staff who hold the employees-adjacent modules still cannot widen their own
+   * access, because reaching this route at all requires being the owner.
+   */
+  @Patch(':id/permissions')
+  @Roles('super_admin', 'store_owner', 'restaurant_owner')
+  @ApiOperation({ summary: 'Replace an employee\'s granted modules (owner only)' })
+  @ApiResponse({ status: 200, description: 'The resulting permission set' })
+  async updatePermissions(
+    @Param('id') id: string,
+    @Body() dto: UpdatePermissionsDto,
+    @CurrentUser() user: any,
+  ) {
+    const employee = await this.employeesService.findOne(id);
+    if (employee) {
+      await this.tenantService.assertStoreAccess(user, employee.storeId);
+    }
+    return this.employeesService.setPermissions(id, dto.permissions);
   }
 
   @Delete(':id')

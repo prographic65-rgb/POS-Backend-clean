@@ -87,12 +87,13 @@ export class RestaurantController {
     @Query('orderStatus') orderStatus?: string,
     @Query('orderType') orderType?: string,
     @Query('tableId') tableId?: string,
+    @Query('search') search?: string,
     @Query('skip') skip?: string,
     @Query('take') take?: string,
     @Query('withCount') withCount?: string,
   ) {
     const store = await this.tenantService.requireRestaurantStore(user);
-    const filters = { orderStatus, orderType, tableId };
+    const filters = { orderStatus, orderType, tableId, search };
 
     // Opt-in envelope. The kitchen and cashier live views deliberately fetch
     // the complete open set — a ticket pushed onto "page 2" is a ticket that

@@ -36,10 +36,11 @@ export class CustomersController {
     @Query('skip') skip?: string,
     @Query('take') take?: string,
     @Query('withCount') withCount?: string,
+    @Query('search') search?: string,
   ) {
     if (wantsCount(withCount)) {
       const paging = parsePaging(skip, take);
-      return this.customersService.findAllPaged(paging.skip, paging.take);
+      return this.customersService.findAllPaged(paging.skip, paging.take, search);
     }
     const paging = parseOptionalPaging(skip, take);
     return this.customersService.findAll(paging.skip, paging.take);

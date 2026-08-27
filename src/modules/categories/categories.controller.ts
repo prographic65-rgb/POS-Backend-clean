@@ -19,7 +19,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Store, Employee, User } from '../../entities';
 import { Request } from 'express';
-import { parsePaging, parseOptionalPaging, wantsCount } from '@/common';
+import { parsePaging, parseOptionalPaging, wantsCount, MAX_CATALOGUE_SIZE } from '@/common';
 
 @ApiTags('Categories')
 @Controller('categories')
@@ -73,7 +73,8 @@ export class CategoriesController {
       const paging = parsePaging(skip, take);
       return this.categoriesService.findAllPaged(storeId, paging.skip, paging.take);
     }
-    const paging = parseOptionalPaging(skip, take);
+    // Categories drive pickers too, so the whole set must come back.
+    const paging = parseOptionalPaging(skip, take, MAX_CATALOGUE_SIZE);
     return this.categoriesService.findAll(storeId, paging.skip, paging.take);
   }
 

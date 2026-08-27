@@ -17,7 +17,7 @@ import * as path from 'path';
 
 dotenv.config();
 
-const STORE_ID = '0f9a9160-7368-4691-be23-1d371dc0fbfb';
+const STORE_ID = '7066205d-e925-4f33-839d-ba312b7fea6e';
 
 /** Seeded margin. cost = price * COST_RATIO. */
 const COST_RATIO = 0.8;
@@ -377,7 +377,8 @@ async function main() {
   });
 
   console.log(`\n✨ Done — ${MENU.length} categories, ${totalItems} products.`);
-  console.log(`   Cost price seeded at ${COST_RATIO * 100}% of selling price (${(1 - COST_RATIO) * 100}% margin).`);
+  const pct = (n: number) => Math.round(n * 100);
+  console.log(`   Cost price seeded at ${pct(COST_RATIO)}% of selling price (${pct(1 - COST_RATIO)}% margin).`);
 
   await dataSource.destroy();
 }

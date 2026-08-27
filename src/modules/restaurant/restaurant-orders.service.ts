@@ -75,12 +75,12 @@ export class RestaurantOrdersService {
 
   private baseQuery(
     storeId: string,
-    filters: { orderStatus?: string; orderType?: string; tableId?: string } = {},
+    filters: { orderStatus?: string; orderType?: string; tableId?: string; search?: string } = {},
   ) {
     const qb = this.ordersRepository
       .createQueryBuilder('order')
       .leftJoinAndSelect('order.items', 'items')
-      .leftJoinAndSelect('order.table', 'table')
+      .leftJoinAndSelect('order.table', 'tbl')
       .leftJoinAndSelect('order.createdBy', 'createdBy')
       .where('order.storeId = :storeId', { storeId })
       // Excludes every general-mode order, which all carry 'none'.
@@ -96,6 +96,29 @@ export class RestaurantOrdersService {
     }
     if (filters.tableId) {
       qb.andWhere('order.tableId = :tableId', { tableId: filters.tableId });
+    }
+
+    /**
+     * Server-side search across the fields the order list actually shows.
+     * Doing this in SQL rather than in the client matters once the list is
+     * paged: filtering the current page only would hide matches sitting on
+     * every other page.
+     */
+    const term = filters.search?.trim();
+    if (term) {
+      // Every alias is quoted: both `order` and `table` are reserved words in
+      // SQL, so an unquoted alias is a syntax error rather than a wrong result.
+      qb.andWhere(
+        `(
+          CAST("order"."orderSequence" AS TEXT) ILIKE :term
+          OR "order"."orderNumber" ILIKE :term
+          OR COALESCE("tbl"."name", '') ILIKE :term
+          OR COALESCE("order"."customerName", '') ILIKE :term
+          OR COALESCE("order"."customerPhone", '') ILIKE :term
+          OR COALESCE("createdBy"."name", '') ILIKE :term
+        )`,
+        { term: `%${term}%` },
+      );
     }
 
     return qb;
@@ -118,7 +141,7 @@ export class RestaurantOrdersService {
    */
   async findAllPaged(
     storeId: string,
-    filters: { orderStatus?: string; orderType?: string; tableId?: string } = {},
+    filters: { orderStatus?: string; orderType?: string; tableId?: string; search?: string } = {},
     paging: { skip: number; take: number },
   ): Promise<Page<any>> {
     const [rows, total] = await this.baseQuery(storeId, filters)

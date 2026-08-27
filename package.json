@@ -27,11 +27,12 @@
     "verify:general": "node scripts/verify-general-flow.mjs",
     "verify:restaurant": "node scripts/verify-restaurant-flow.mjs",
     "verify:realtime": "node scripts/verify-realtime.mjs",
-    "verify:all": "npm run verify:auth && npm run verify:general && npm run verify:restaurant && npm run verify:realtime && npm run verify:order-numbers && npm run verify:pagination",
+    "verify:all": "npm run verify:auth && npm run verify:general && npm run verify:restaurant && npm run verify:realtime && npm run verify:order-numbers && npm run verify:pagination && npm run verify:search",
     "db:seed-restaurant": "ts-node scripts/seed-restaurant.ts",
     "verify:order-numbers": "node scripts/verify-order-numbers.mjs",
     "verify:pagination": "node scripts/verify-pagination.mjs",
-    "db:seed-snackfuel": "ts-node scripts/seed-snackfuel.ts"
+    "db:seed-snackfuel": "ts-node scripts/seed-snackfuel.ts",
+    "verify:search": "node scripts/verify-search.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",
