@@ -112,7 +112,7 @@ export class RestaurantController {
     return this.ordersService.findOne(id, store.id);
   }
 
-  /** Waiters punch dine-in; cashiers take takeaway and delivery. */
+  /** Waiters punch dine-in and dine-out; cashiers take takeaway and delivery. */
   @Post('orders')
   @Roles('waiter', 'cashier', 'restaurant_owner')
   @ApiOperation({ summary: 'Create an order, as a draft or sent to the kitchen' })
@@ -162,7 +162,10 @@ export class RestaurantController {
 
   @Patch('orders/:id/status')
   @Roles('kitchen', 'restaurant_owner')
-  @ApiOperation({ summary: 'Kitchen moves an order to preparing' })
+  @ApiOperation({
+    summary: 'Kitchen moves an order along: preparing, then handed over to the floor',
+  })
+  @ApiResponse({ status: 409, description: 'Not a legal transition from the current status' })
   async updateStatus(
     @CurrentUser() user: any,
     @Param('id') id: string,
@@ -172,16 +175,21 @@ export class RestaurantController {
     return this.ordersService.updateStatus(id, store.id, dto);
   }
 
+  /**
+   * Cash is always taken by a cashier, so the caller is recorded as the
+   * settler — and, when the tenant has shifts on, must have an open drawer.
+   */
   @Post('orders/:id/settle')
   @Roles('cashier', 'restaurant_owner')
   @ApiOperation({ summary: 'Apply a discount, take payment, complete, and free the table' })
+  @ApiResponse({ status: 409, description: 'Shifts are on and the cashier has none open' })
   async settle(
     @CurrentUser() user: any,
     @Param('id') id: string,
     @Body() dto: SettleOrderDto,
   ) {
     const store = await this.tenantService.requireRestaurantStore(user);
-    return this.ordersService.settle(id, store.id, dto);
+    return this.ordersService.settle(id, store.id, dto, user.id);
   }
 
   /** Deliberately excludes the kitchen — cancelling is a money decision. */

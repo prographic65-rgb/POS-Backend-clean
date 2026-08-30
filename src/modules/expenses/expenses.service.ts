@@ -1,8 +1,9 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { Expense, ExpenseCategory, type ExpensePaymentMethod } from '@/entities';
 import { toPage, type Page } from '@/common';
+import { ShiftsService } from '../shifts/shifts.service';
 import { CreateExpenseDto, UpdateExpenseDto } from './dto';
 
 export interface ExpenseSummary {
@@ -21,6 +22,8 @@ export class ExpensesService {
     private expensesRepository: Repository<Expense>,
     @InjectRepository(ExpenseCategory)
     private categoriesRepository: Repository<ExpenseCategory>,
+    private shiftsService: ShiftsService,
+    private dataSource: DataSource,
   ) {}
 
   /** 'YYYY-MM-DD' for the server's local day, used when a client sends none. */
@@ -29,6 +32,33 @@ export class ExpensesService {
     const month = String(now.getMonth() + 1).padStart(2, '0');
     const day = String(now.getDate()).padStart(2, '0');
     return `${now.getFullYear()}-${month}-${day}`;
+  }
+
+  /**
+   * The open drawer this spend came out of, if any.
+   *
+   * Returns null rather than throwing on any failure: linking to a shift makes
+   * the till reconcile, but it must never be the reason booking an expense
+   * fails.
+   */
+  private async resolveShiftId(
+    storeId: string,
+    paymentMethod: string | undefined,
+    createdById: string | undefined,
+  ): Promise<string | null> {
+    if (paymentMethod !== 'cash' || !createdById) return null;
+
+    try {
+      const stamp = await this.shiftsService.stampSettlement(
+        this.dataSource.manager,
+        storeId,
+        createdById,
+        { enforce: false },
+      );
+      return stamp.shiftId;
+    } catch {
+      return null;
+    }
   }
 
   /** A category id must belong to the same store, or it is not a real link. */
@@ -48,6 +78,17 @@ export class ExpensesService {
   ): Promise<Expense> {
     await this.assertCategoryInStore(storeId, dto.categoryId);
 
+    /**
+     * A CASH expense entered while the author has a drawer open is money that
+     * physically left that drawer, so it must reduce their expected cash —
+     * otherwise the cashier who paid a supplier looks short at closing.
+     *
+     * Attached by WHEN it was entered, not by `expenseDate`: back-dating a
+     * receipt does not change which till the notes came out of. Card/bank
+     * spend never touches a drawer, so it stays unlinked.
+     */
+    const shiftId = await this.resolveShiftId(storeId, dto.paymentMethod, createdById);
+
     // `paymentMethod` is validated against the same list by @IsIn, but the DTO
     // types it as a plain string so the DTO does not import the entity's union.
     const expense = this.expensesRepository.create({
@@ -55,6 +96,7 @@ export class ExpensesService {
       title: dto.title.trim(),
       storeId,
       createdById: createdById ?? null,
+      shiftId,
       paymentMethod: (dto.paymentMethod as ExpensePaymentMethod) ?? null,
       // The client sends its own local day; falling back to the server's is
       // only for API callers that omit it.

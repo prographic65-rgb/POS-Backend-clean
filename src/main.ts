@@ -1,10 +1,14 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import { promises as fs } from 'fs';
 import { AppModule } from './app.module';
+import { UPLOAD_DIR, LOGO_DIR } from './modules/stores/stores.service';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // Typed as NestExpressApplication so useStaticAssets() below is available.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   const allowedOrigins = [
     'http://localhost:8080',
@@ -32,6 +36,26 @@ async function bootstrap() {
 
   // Add API prefix
   app.setGlobalPrefix('api');
+
+  /**
+   * Uploaded tenant assets (currently store logos).
+   *
+   * Served under '/api/uploads/' even though static assets bypass
+   * setGlobalPrefix: deployments front this service with a proxy that
+   * forwards '/api/*', so anything at the bare root would 404 in production.
+   *
+   * The CORS allowlist above does not apply — an <img> loads no-cors, and the
+   * mobile Image component sends no Origin.
+   */
+  await fs.mkdir(LOGO_DIR, { recursive: true });
+  app.useStaticAssets(UPLOAD_DIR, {
+    prefix: '/api/uploads/',
+    // Filenames are timestamped, so a replaced logo gets a fresh URL and this
+    // can be cached hard.
+    maxAge: '7d',
+    index: false,
+    dotfiles: 'deny',
+  });
 
   // Swagger configuration
   const config = new DocumentBuilder()

@@ -116,7 +116,7 @@ export class OrdersController {
     @Body() updateOrderDto: UpdateOrderDto,
   ) {
     const storeId = await this.getStoreIdFromUser(req.user);
-    return this.ordersService.update(id, updateOrderDto, storeId);
+    return this.ordersService.update(id, updateOrderDto, storeId, (req.user as any).id);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -129,7 +129,12 @@ export class OrdersController {
     @Body() markAsPaidDto: MarkAsPaidDto,
   ) {
     const storeId = await this.getStoreIdFromUser(req.user);
-    return this.ordersService.markAsPaid(id, storeId, markAsPaidDto.paymentMethod);
+    return this.ordersService.markAsPaid(
+      id,
+      storeId,
+      markAsPaidDto.paymentMethod,
+      (req.user as any).id,
+    );
   }
 
   @UseGuards(JwtAuthGuard)

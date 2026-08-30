@@ -69,6 +69,30 @@ export class Store {
   @Column({ type: 'varchar', length: 255, nullable: true, default: 'BP-80' })
   printerConfig?: string;
 
+  /**
+   * Turns on cashier shifts for this tenant.
+   *
+   * Defaults to OFF so the release changes nothing for existing stores: with
+   * it off, settling still records WHO took the money, but no one is blocked
+   * for lacking an open shift. An owner opts in when their staff are ready,
+   * because switching it on makes "open your shift" a precondition of taking
+   * any payment.
+   *
+   * Restaurant tenants only for now — the general POS has no till widget yet.
+   */
+  @Column({ type: 'boolean', default: false })
+  shiftsEnabled: boolean;
+
+  /**
+   * Server-relative path to the tenant's logo, e.g. '/uploads/logo/<id>-<ts>.png'.
+   *
+   * Stored relative, never absolute: the API's public origin differs between
+   * dev, mobile emulators and production, so clients join it onto their own
+   * base URL rather than trusting a host baked in at upload time.
+   */
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  logoUrl?: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

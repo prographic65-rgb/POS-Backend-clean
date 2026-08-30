@@ -22,14 +22,33 @@ export class RestaurantReportsService {
     const qb = this.ordersRepository
       .createQueryBuilder('order')
       .leftJoinAndSelect('order.items', 'items')
-      .leftJoinAndSelect('order.createdBy', 'createdBy')
+      /**
+       * Users are joined WITHOUT AndSelect: `User.passwordHash` has no
+       * `select: false`, so selecting the whole relation pulls every bcrypt
+       * hash into memory. Only the two columns the report needs are read.
+       */
+      .leftJoin('order.createdBy', 'createdBy')
+      .addSelect(['createdBy.id', 'createdBy.name'])
+      .leftJoin('order.settledBy', 'settledBy')
+      .addSelect(['settledBy.id', 'settledBy.name'])
       .where('order.storeId = :storeId', { storeId })
       // Only settled money counts. Drafts, live orders and cancellations are
       // excluded — counting a draft as revenue is how dashboards start lying.
       .andWhere("order.orderStatus = 'completed'");
 
-    if (from) qb.andWhere('order.createdAt >= :from', { from: new Date(from) });
-    if (to) qb.andWhere('order.createdAt <= :to', { to: new Date(to) });
+    /**
+     * Windowed on when the money was TAKEN, falling back to creation for rows
+     * that predate settledAt. An order opened at 23:50 and paid at 00:10 is
+     * the next day's revenue — and belongs to the cashier who was on then.
+     */
+    if (from) {
+      qb.andWhere('COALESCE(order.settledAt, order.createdAt) >= :from', {
+        from: new Date(from),
+      });
+    }
+    if (to) {
+      qb.andWhere('COALESCE(order.settledAt, order.createdAt) <= :to', { to: new Date(to) });
+    }
 
     const orders = await qb.getMany();
 
@@ -39,6 +58,8 @@ export class RestaurantReportsService {
     let unknownCostLineCount = 0;
     const byProduct = new Map<string, { name: string; quantity: number; revenue: number; profit: number }>();
     const byWaiter = new Map<string, { name: string; orders: number; revenue: number }>();
+    /** Who COLLECTED the money, as opposed to who took the order. */
+    const byCashier = new Map<string, { name: string; orders: number; revenue: number }>();
     const byType: Record<string, { orders: number; revenue: number }> = {};
 
     for (const order of orders) {
@@ -59,6 +80,18 @@ export class RestaurantReportsService {
       waiter.orders += 1;
       waiter.revenue += total;
       byWaiter.set(waiterId, waiter);
+
+      /**
+       * Keyed on settledById, never createdById: the waiter opens the order,
+       * the cashier takes the money. Orders settled before this column existed
+       * bucket as "Unattributed" rather than being credited to the waiter.
+       */
+      const cashierId = order.settledById ?? 'unattributed';
+      const cashierName = (order as any).settledBy?.name ?? 'Unattributed';
+      const cashier = byCashier.get(cashierId) ?? { name: cashierName, orders: 0, revenue: 0 };
+      cashier.orders += 1;
+      cashier.revenue += total;
+      byCashier.set(cashierId, cashier);
 
       for (const line of order.items ?? []) {
         const qty = Number(line.quantity) || 0;
@@ -105,6 +138,9 @@ export class RestaurantReportsService {
       byWaiter: [...byWaiter.values()]
         .sort((a, b) => b.revenue - a.revenue)
         .map((w) => ({ ...w, revenue: round2(w.revenue) })),
+      byCashier: [...byCashier.values()]
+        .sort((a, b) => b.revenue - a.revenue)
+        .map((c) => ({ ...c, revenue: round2(c.revenue) })),
       byOrderType: Object.entries(byType).map(([type, v]) => ({
         orderType: type,
         orders: v.orders,

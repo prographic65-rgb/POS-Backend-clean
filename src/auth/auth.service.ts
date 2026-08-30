@@ -32,19 +32,25 @@ export class AuthService {
 
   async getUserWithStore(user: any) {
     let storeId: string | undefined;
+    let storeName: string | undefined;
     let currency: string | undefined;
     let printerConfig: string | undefined;
     let accountType: string | undefined;
     let designation: string | undefined;
     let printerName: string | undefined;
+    let logoUrl: string | undefined | null;
+    let shiftsEnabled: boolean | undefined;
     let storedPermissions: string[] | null = null;
 
     if (user.role === 'store_owner') {
       const store = await this.storesRepository.findOne({ where: { userId: user.id } });
       storeId = store?.id;
+      storeName = store?.name;
       currency = store?.currency;
       printerConfig = store?.printerConfig;
       accountType = store?.accountType;
+      logoUrl = store?.logoUrl;
+      shiftsEnabled = store?.shiftsEnabled;
     } else if (user.role === 'employee' || user.role === 'cashier') {
       const employee = await this.employeesRepository.findOne({ where: { userId: user.id } });
       storeId = employee?.storeId;
@@ -53,9 +59,12 @@ export class AuthService {
       storedPermissions = employee?.permissions ?? null;
       if (storeId) {
         const store = await this.storesRepository.findOne({ where: { id: storeId } });
+        storeName = store?.name;
         currency = store?.currency;
         printerConfig = store?.printerConfig;
         accountType = store?.accountType;
+        logoUrl = store?.logoUrl;
+        shiftsEnabled = store?.shiftsEnabled;
       }
     }
 
@@ -67,6 +76,15 @@ export class AuthService {
     return {
       ...safeUser,
       storeId,
+      /**
+       * Store identity and tenant flags ride along here rather than forcing
+       * every screen to fetch GET /stores/:id — the sidebar needs the name and
+       * logo on first paint, and the till needs to know whether shifts are on
+       * before it can decide to block settling.
+       */
+      storeName,
+      logoUrl: logoUrl ?? null,
+      shiftsEnabled: shiftsEnabled ?? false,
       currency,
       printerConfig,
       accountType,

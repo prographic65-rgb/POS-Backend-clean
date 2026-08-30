@@ -1,5 +1,6 @@
 import {
   IsArray,
+  IsBoolean,
   IsIn,
   IsNotEmpty,
   IsNumber,
@@ -44,14 +45,34 @@ export class RestaurantOrderItemDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  /**
+   * Pack this line to take away, on a `dine_out` order that is otherwise eaten
+   * at the table. MUST be declared here: the global ValidationPipe runs with
+   * `whitelist: true`, so an undeclared field is silently dropped and the
+   * kitchen would never learn to box anything.
+   */
+  @ApiPropertyOptional({
+    example: false,
+    description: 'Pack this line to go. Only meaningful on a dine_out order.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  isParcel?: boolean;
 }
 
 export class CreateRestaurantOrderDto {
-  @ApiProperty({ enum: ['dine_in', 'takeaway', 'delivery'] })
-  @IsIn(['dine_in', 'takeaway', 'delivery'])
-  orderType: 'dine_in' | 'takeaway' | 'delivery';
+  @ApiProperty({
+    enum: ['dine_in', 'dine_out', 'takeaway', 'delivery'],
+    description:
+      'dine_out = eating in AND taking a parcel home; it occupies a table like dine_in.',
+  })
+  @IsIn(['dine_in', 'dine_out', 'takeaway', 'delivery'])
+  orderType: 'dine_in' | 'dine_out' | 'takeaway' | 'delivery';
 
-  @ApiPropertyOptional({ description: 'Required for dine_in. Ignored otherwise.' })
+  @ApiPropertyOptional({
+    description: 'Required for dine_in and dine_out. Ignored for takeaway/delivery.',
+  })
   @IsOptional()
   @IsUUID()
   tableId?: string;
@@ -127,10 +148,20 @@ export class AddOrderItemsDto {
   items: RestaurantOrderItemDto[];
 }
 
+/**
+ * What the KITCHEN may set.
+ *
+ * 'completed' is deliberately absent: it means "paid and the table is free",
+ * which only the cashier's settle() may do. Allowing it here let the kitchen
+ * strand a table forever and book unpaid orders as revenue.
+ */
 export class UpdateOrderStatusDto {
-  @ApiProperty({ enum: ['preparing', 'completed'] })
-  @IsIn(['preparing', 'completed'])
-  orderStatus: 'preparing' | 'completed';
+  @ApiProperty({
+    enum: ['preparing', 'handed_over'],
+    description: 'handed_over = cooked and passed to the floor; still unpaid.',
+  })
+  @IsIn(['preparing', 'handed_over'])
+  orderStatus: 'preparing' | 'handed_over';
 }
 
 export class SettleOrderDto {

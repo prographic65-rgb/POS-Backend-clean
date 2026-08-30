@@ -452,6 +452,80 @@ Authorization: Bearer <token>
 
 ---
 
+### Cashier Shifts
+
+A **shift** is one cashier's window of accountability over a cash drawer. Every
+payment settled while it is open is stamped onto it (`orders.shiftId`,
+`orders.settledById`, `orders.settledAt`), so several cashiers can work the same
+day and each hand over exactly what they collected.
+
+Restaurant accounts only, and only once the owner sets `shiftsEnabled` on the
+store. While the flag is off, settling still records **who** took the money but
+nobody is blocked for lacking a drawer.
+
+| Method | Endpoint | Who | Notes |
+|---|---|---|---|
+| GET | `/shifts/current` | cashier | My open shift with live totals, or `null` |
+| POST | `/shifts/open` | cashier | `{ openingFloat }`. 409 if shifts are off or one is already open |
+| POST | `/shifts/:id/close` | own cashier, or owner | `{ countedCash, notes? }`. Freezes the figures |
+| POST | `/shifts/:id/force-close` | owner | For a cashier who left without closing; variance stays unknown |
+| POST | `/shifts/:id/collect` | owner | `{ collectedAmount, notes? }`. Confirms the cash was received |
+| GET | `/shifts` | owner | `?status&userId&from&to` (+ paging) |
+| GET | `/shifts/mine` | cashier | Own history |
+| GET | `/shifts/:id` | own cashier, or owner | Shift, totals, **and the orders settled in it** |
+| GET | `/shifts/me/dashboard` | cashier | `?from&to` — what this cashier collected, by payment method |
+| GET | `/shifts/summary/by-cashier` | owner | `?from&to` — one row per cashier: takings, variance, still to collect |
+
+**Reconciliation.** Only cash passes through the drawer:
+
+```
+expectedCash = openingFloat + cashSales − cashPaidOut
+difference   = countedCash − expectedCash        (negative = short)
+```
+
+`cashPaidOut` comes from cash expenses booked by that cashier while their shift
+was open. Card and online takings are reported but never handed over as notes.
+
+Settling a restaurant order returns **409** when the tenant has shifts enabled
+and the caller has no open drawer.
+
+### Store Settings & Logo
+
+| Method | Endpoint | Who | Notes |
+|---|---|---|---|
+| PATCH | `/stores/:id/settings` | owner | `{ name?, address?, phone?, email?, shiftsEnabled? }`. `shiftsEnabled: true` is rejected for non-restaurant accounts |
+| POST | `/stores/:id/logo` | owner | `multipart/form-data`, field `logo`. PNG/JPEG/WebP, max 500 KB. **413** if larger, **400** if another type |
+| DELETE | `/stores/:id/logo` | owner | Removes the file and clears `logoUrl` |
+
+`logoUrl` is server-relative (`/uploads/logo/<id>-<ts>.png`); clients join it
+onto their own API base URL. Files are served from `/api/uploads/…`.
+
+`GET /auth/me` additionally returns `storeName`, `logoUrl` and `shiftsEnabled`,
+so clients do not have to fetch the store to render an identity or decide
+whether the till requires a shift.
+
+### Restaurant order lifecycle
+
+```
+draft → requested → preparing → handed_over → completed
+```
+
+- **`handed_over`** is the KITCHEN's terminal state: cooked and passed to the
+  floor. The order is still unpaid and still holds its table.
+- `PATCH /restaurant/orders/:id/status` accepts only `preparing` and
+  `handed_over`, and validates the transition (409 otherwise). The kitchen
+  cannot set `completed` — that means paid and table freed, which only
+  settling may do.
+- The cashier may settle from any live status; `handed_over` is simply what
+  their screen highlights as ready to bill.
+
+**Order types**: `dine_in`, `dine_out`, `takeaway`, `delivery`. `dine_out` is a
+dine-in order that also takes a parcel home — it requires a table exactly like
+`dine_in`, and individual lines are flagged with `isParcel` so the kitchen
+knows what to box. One receipt covers both.
+
+---
+
 ## Pagination
 
 List endpoints support pagination:

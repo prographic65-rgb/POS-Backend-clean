@@ -76,9 +76,9 @@ describe('resolvePermissions', () => {
     it('adds what the owner assigned, keeping the base first', () => {
       expect(
         resolvePermissions(
-          employee({ designation: 'cashier', permissions: ['dashboard', 'expenses'] }),
+          employee({ designation: 'cashier', permissions: ['orders', 'expenses'] }),
         ),
-      ).toEqual(['cashier', 'dashboard', 'expenses']);
+      ).toEqual(['cashier', 'orders', 'expenses']);
     });
 
     /** The rule that makes the feature safe to expose. */
@@ -90,10 +90,23 @@ describe('resolvePermissions', () => {
       ).toEqual(['kitchen', 'expenses']);
     });
 
+    /**
+     * The owner's dashboard shows whole-store revenue, profit and every
+     * cashier's takings. Restaurant staff get their own screens instead, so a
+     * stored grant left over from before must not resurrect it.
+     */
+    it('never gives restaurant staff the owner dashboard, however it was stored', () => {
+      for (const designation of ['cashier', 'kitchen', 'waiter']) {
+        expect(
+          resolvePermissions(employee({ designation, permissions: ['dashboard'] })),
+        ).not.toContain('dashboard');
+      }
+    });
+
     it('does not duplicate the base when it was also stored', () => {
       expect(
-        resolvePermissions(employee({ designation: 'waiter', permissions: ['tables', 'dashboard'] })),
-      ).toEqual(['tables', 'dashboard']);
+        resolvePermissions(employee({ designation: 'waiter', permissions: ['tables', 'expenses'] })),
+      ).toEqual(['tables', 'expenses']);
     });
 
     it('lets a general employee be given any module their tenant has', () => {
@@ -147,19 +160,27 @@ describe('resolvePermissions', () => {
 describe('basePermissionFor / grantablePermissionsFor', () => {
   it('never lets kitchen or waiting staff be offered the till or the menu', () => {
     for (const designation of ['kitchen', 'waiter']) {
-      expect(grantablePermissionsFor('restaurant', designation)).toEqual(['dashboard', 'expenses']);
+      expect(grantablePermissionsFor('restaurant', designation)).toEqual(['expenses']);
     }
   });
 
   it('offers a restaurant cashier the wider set', () => {
     expect(grantablePermissionsFor('restaurant', 'cashier')).toEqual([
-      'dashboard',
       'expenses',
       'tables',
       'categories',
       'products',
       'orders',
     ]);
+  });
+
+  /** The owner's dashboard is not delegatable on a restaurant tenant. */
+  it('never offers the owner dashboard to any restaurant designation', () => {
+    for (const designation of ['cashier', 'kitchen', 'waiter', 'Bartender']) {
+      expect(grantablePermissionsFor('restaurant', designation)).not.toContain('dashboard');
+    }
+    // A general store is unchanged — its dashboard is still delegatable.
+    expect(grantablePermissionsFor('general', 'staff')).toContain('dashboard');
   });
 
   it('treats an unrecognised restaurant designation as a cashier throughout', () => {
@@ -180,8 +201,14 @@ describe('basePermissionFor / grantablePermissionsFor', () => {
 
 describe('sanitizePermissions', () => {
   it('keeps only what the designation allows', () => {
-    expect(sanitizePermissions('restaurant', 'waiter', ['dashboard', 'cashier', 'orders'])).toEqual([
-      'dashboard',
+    expect(
+      sanitizePermissions('restaurant', 'waiter', ['expenses', 'cashier', 'orders']),
+    ).toEqual(['expenses']);
+  });
+
+  it('refuses to store the owner dashboard for restaurant staff', () => {
+    expect(sanitizePermissions('restaurant', 'cashier', ['dashboard', 'orders'])).toEqual([
+      'orders',
     ]);
   });
 

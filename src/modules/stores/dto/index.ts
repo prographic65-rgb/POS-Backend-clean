@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsIn, IsEmail, MinLength } from 'class-validator';
+import { IsString, IsOptional, IsIn, IsEmail, IsBoolean, MinLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateStoreDto {
@@ -55,6 +55,47 @@ export class CreateStoreDto {
   @IsOptional()
   @IsString()
   printerConfig?: string;
+}
+
+/**
+ * What a store OWNER may change about their own store.
+ *
+ * Deliberately much narrower than UpdateStoreDto, which stays platform-admin
+ * only: `plan`, `currency` and `type` are commercial/structural settings, and
+ * an owner editing their own plan is not a thing this product allows.
+ *
+ * Every field must be declared here or the global `whitelist: true`
+ * ValidationPipe drops it silently.
+ */
+export class UpdateStoreSettingsDto {
+  @ApiProperty({ required: false, description: 'Shown on receipts and in the app.' })
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  address?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  phone?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  email?: string;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Require cashiers to open a shift before taking payments. Restaurant accounts only.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  shiftsEnabled?: boolean;
 }
 
 export class UpdateStoreDto {

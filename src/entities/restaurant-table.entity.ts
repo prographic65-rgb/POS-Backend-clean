@@ -31,9 +31,13 @@ export class RestaurantTable {
   /**
    * Denormalized from "does a live order exist for this table". Kept as a
    * column because the waiter grid and every socket payload want it cheaply,
-   * but it is NOT the invariant — the partial unique index on
-   * `orders.tableId WHERE orderStatus IN ('requested','preparing')` is.
-   * `currentOrderId` exists so drift between the two is detectable.
+   * but it is NOT the invariant — the partial unique index
+   * `UQ_orders_live_table_v2` on
+   * `orders.tableId WHERE orderStatus IN ('requested','preparing','handed_over')`
+   * is. `currentOrderId` exists so drift between the two is detectable.
+   *
+   * Note a handed-over order still holds its table: the kitchen has served the
+   * food, but the guests are still sitting there and have not paid.
    */
   @Column({
     type: 'enum',

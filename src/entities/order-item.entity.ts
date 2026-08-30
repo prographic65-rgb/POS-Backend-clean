@@ -62,6 +62,18 @@ export class OrderItem {
   notes?: string;
 
   /**
+   * This line is to be packed to take away, on an order that is otherwise
+   * eaten at the table (`orderType: 'dine_out'`).
+   *
+   * `default: false` is load-bearing, not cosmetic — the same trap documented
+   * on Order.version: TypeORM would otherwise emit `ADD COLUMN ... NOT NULL`
+   * with no default, which fails outright on a populated table and takes the
+   * API down at boot, since synchronize runs during startup.
+   */
+  @Column({ default: false })
+  isParcel: boolean;
+
+  /**
    * When this line was sent to the kitchen. Set per round, so appending a
    * second round to a live order prints a ticket containing only the new
    * lines instead of reprinting the whole order. NULL while still a draft.

@@ -19,6 +19,13 @@ export const RealtimeEvents = {
   orderUpdated: 'order:updated',
   tableUpdated: 'table:updated',
   draftUpdated: 'draft:updated',
+  /**
+   * Cashier shifts. The owner's dashboard watches these so a drawer closing
+   * mid-service shows up as "waiting to be collected" without a refresh.
+   */
+  shiftOpened: 'shift:opened',
+  shiftClosed: 'shift:closed',
+  shiftCollected: 'shift:collected',
 } as const;
 
 /**

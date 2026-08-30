@@ -48,3 +48,6 @@ dist
 node_modules
 .env
 .env.production
+
+# Uploaded tenant assets (store logos). Runtime data, not source.
+uploads

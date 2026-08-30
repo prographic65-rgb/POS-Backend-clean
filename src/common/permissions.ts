@@ -84,13 +84,19 @@ const GENERAL_BASE: PermissionKey = 'pos';
  *
  * A restaurant cashier already handles money and the floor, so they can be
  * lifted most of the way to an owner's view. Kitchen and waiting staff can
- * only be given the two back-office modules — granting them the till or the
- * menu editor is not a mistake worth making possible.
+ * only be given the back-office ledger — granting them the till or the menu
+ * editor is not a mistake worth making possible.
+ *
+ * `dashboard` is deliberately NOT grantable on a restaurant tenant. It is the
+ * OWNER's dashboard: whole-store revenue, profit, cost prices and every
+ * cashier's takings. A cashier gets their own screen instead — what they
+ * personally collected — which their base `cashier` module already opens.
+ * Kitchen and waiting staff have no business seeing store revenue at all.
  */
 const RESTAURANT_GRANTABLE: Record<string, PermissionKey[]> = {
-  cashier: ['dashboard', 'expenses', 'tables', 'categories', 'products', 'orders'],
-  kitchen: ['dashboard', 'expenses'],
-  waiter: ['dashboard', 'expenses'],
+  cashier: ['expenses', 'tables', 'categories', 'products', 'orders'],
+  kitchen: ['expenses'],
+  waiter: ['expenses'],
 };
 
 /** General-account staff may be assigned any module their tenant has. */

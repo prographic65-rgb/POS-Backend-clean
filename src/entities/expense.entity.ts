@@ -69,6 +69,18 @@ export class Expense {
   @Column({ type: 'uuid', nullable: true })
   createdById?: string | null;
 
+  /**
+   * The cashier shift this spend came out of, when it was paid in cash from an
+   * open drawer. This is what makes a till reconcile: expected cash is
+   * `openingFloat + cashSales - cashPaidOut`, and without this link a cashier
+   * who paid a supplier from the drawer would always look short.
+   *
+   * Null for card/bank/other spend, for entries made outside a shift, and for
+   * every historical row.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  shiftId?: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

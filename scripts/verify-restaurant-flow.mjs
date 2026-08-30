@@ -166,6 +166,25 @@ const prep = await call('PATCH', `/restaurant/orders/${punch.body.id}/status`, {
 check('kitchen sets preparing', prep.status === 200 && prep.body?.orderStatus === 'preparing', prep.body?.orderStatus);
 check('kitchen cannot settle', (await call('POST', `/restaurant/orders/${punch.body.id}/settle`, {}, kAuth.accessToken)).status === 403);
 
+// The kitchen's authority ends at handed_over. 'completed' means paid and the
+// table freed, which only settling may do — allowing it here used to strand
+// the table forever and book an unpaid order as revenue.
+check('kitchen cannot mark an order completed',
+  (await call('PATCH', `/restaurant/orders/${punch.body.id}/status`, { orderStatus: 'completed' }, kAuth.accessToken)).status === 400);
+
+const handed = await call('PATCH', `/restaurant/orders/${punch.body.id}/status`, { orderStatus: 'handed_over' }, kAuth.accessToken);
+check('kitchen hands the order over', handed.status === 200 && handed.body?.orderStatus === 'handed_over', handed.body?.orderStatus);
+check('a handed-over order is still unpaid', handed.body?.paymentStatus === 'unpaid', handed.body?.paymentStatus);
+
+// The guests are still sitting there; only payment frees the table.
+const stillHeld = await call('GET', '/restaurant/tables', undefined, wAuth.accessToken);
+check('handed-over order still occupies its table',
+  stillHeld.body?.find((t) => t.id === t1.body.id)?.status === 'reserved',
+  String(stillHeld.body?.find((t) => t.id === t1.body.id)?.status));
+
+check('a handed-over order cannot go back to preparing',
+  (await call('PATCH', `/restaurant/orders/${punch.body.id}/status`, { orderStatus: 'preparing' }, kAuth.accessToken)).status === 409);
+
 // ------------------------------------------------------------ cashier
 const pct = await call('POST', `/restaurant/orders/${punch.body.id}/settle`, {
   discountType: 'percent', discountValue: 25, paymentMethod: 'cash',
@@ -175,6 +194,15 @@ check('25% of 2200 => 550 discount', Number(pct.body?.discount) === 550, String(
 check('total after discount is 1650', Number(pct.body?.total) === 1650, String(pct.body?.total));
 check('settled order is completed', pct.body?.orderStatus === 'completed');
 check('settled order is paid', pct.body?.paymentStatus === 'paid');
+// Cash is always taken by a cashier — never by the waiter who opened it.
+check('settled order records who took the money',
+  pct.body?.settledById === cAuth.user?.id && !!pct.body?.settledAt,
+  `settledById ${pct.body?.settledById}`);
+check('settler is not the waiter who created the order',
+  pct.body?.settledById !== pct.body?.createdById);
+// The order list joins users; a blanket select would ship bcrypt hashes.
+check('order responses never leak a password hash',
+  !JSON.stringify(pct.body).includes('passwordHash'));
 
 const freed = await call('GET', '/restaurant/tables', undefined, wAuth.accessToken);
 check('table freed after settling',
@@ -203,6 +231,35 @@ check('total never goes negative', Number(over.body?.total) === 0, String(over.b
 // Delivery requires an address
 check('delivery without an address is rejected',
   (await call('POST', '/restaurant/orders', { orderType: 'delivery', items: [{ productId: p1.body.id, quantity: 1 }] }, cAuth.accessToken)).status === 400);
+
+// ----------------------------------------------------------- dine_out
+// Eating in AND taking a parcel: one order, one bill, one table.
+check('dine_out without a table is rejected',
+  (await call('POST', '/restaurant/orders', {
+    orderType: 'dine_out', items: [{ productId: p1.body.id, quantity: 1 }],
+  }, wAuth.accessToken)).status === 400);
+
+const t3 = await call('POST', '/restaurant/tables', { name: 'Table 3' }, OT);
+const dineOut = await call('POST', '/restaurant/orders', {
+  orderType: 'dine_out',
+  tableId: t3.body.id,
+  items: [
+    { productId: p1.body.id, quantity: 1 },
+    { productId: p2.body.id, quantity: 1, isParcel: true },
+  ],
+}, wAuth.accessToken);
+check('waiter punches a dine_out order', dineOut.status === 201, `status ${dineOut.status}`);
+// The bug this guards: the tableId used to be nulled for anything that was
+// not literally 'dine_in', stranding the order with no table.
+check('dine_out keeps its table', dineOut.body?.tableId === t3.body.id, String(dineOut.body?.tableId));
+const dineOutTables = await call('GET', '/restaurant/tables', undefined, wAuth.accessToken);
+check('dine_out reserves its table',
+  dineOutTables.body?.find((t) => t.id === t3.body.id)?.status === 'reserved');
+check('the parcel flag round-trips per line',
+  (dineOut.body?.items ?? []).filter((i) => i.isParcel).length === 1,
+  String((dineOut.body?.items ?? []).map((i) => i.isParcel)));
+check('non-parcel lines stay unmarked',
+  (dineOut.body?.items ?? []).some((i) => i.isParcel === false));
 
 // ------------------------------------------------------------ reports
 const report = await call('GET', '/restaurant/reports/sales', undefined, OT);
