@@ -2,6 +2,14 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
+// `cron` is pinned to an EXACT version in package.json, and repeated under
+// "overrides", because @nestjs/schedule depends on `cron: "3.2.1"` with no
+// caret. A range here (`^3.2.1` resolves to 3.5.0) makes npm install a second
+// copy nested under @nestjs/schedule, and the two copies declare structurally
+// different CronJob types — so `scheduler.addCronJob(name, job)` below fails to
+// compile with TS2345. It built locally only because that machine happened to
+// hold 3.2.1 at the root; a clean install (Railway, CI) resolves the newer one
+// and the build dies. Bumping @nestjs/schedule means re-checking its cron pin.
 import { CronJob } from 'cron';
 import { Repository } from 'typeorm';
 import { Store } from '../../entities';
