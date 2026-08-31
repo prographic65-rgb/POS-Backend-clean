@@ -17,7 +17,7 @@ import * as path from 'path';
 
 dotenv.config();
 
-const STORE_ID = '7066205d-e925-4f33-839d-ba312b7fea6e';
+const STORE_ID = 'b4bc9cb8-583f-4391-9387-639429d9d518';
 
 /** Seeded margin. cost = price * COST_RATIO. */
 const COST_RATIO = 0.8;

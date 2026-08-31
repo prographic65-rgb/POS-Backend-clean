@@ -43,6 +43,10 @@ export class Store {
    * `UPDATE … SET orderSequence = orderSequence + 1 … RETURNING` inside the
    * order transaction — a read-then-write would hand two concurrent waiters
    * the same number.
+   *
+   * OrderSequenceResetService zeroes this every morning (6am by default), so
+   * the value is "last number issued TODAY", not a lifetime total. Nothing may
+   * treat it as unique or monotonic across days.
    */
   @Column({ type: 'int', default: 0 })
   orderSequence: number;

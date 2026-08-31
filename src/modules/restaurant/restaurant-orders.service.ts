@@ -690,6 +690,10 @@ export class RestaurantOrdersService {
    *
    * Numbering is per store and starts at 1, so the count is independent of
    * other restaurants on the platform.
+   *
+   * The counter is zeroed daily by OrderSequenceResetService, which is why
+   * this returns 1 again each morning. That also means the number REPEATS
+   * across days: it identifies an order only together with its date.
    */
   private async nextOrderSequence(manager: EntityManager, storeId: string): Promise<number> {
     const raw = await manager.query(

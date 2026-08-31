@@ -108,6 +108,10 @@ export class Order {
   /**
    * The number the restaurant actually shows: 1, 2, 3… per store.
    * Null for general-account orders, which keep using `orderNumber`.
+   *
+   * NOT unique. OrderSequenceResetService restarts the store's counter at 1
+   * every morning, so yesterday's #7 and today's #7 both exist — anything
+   * looking an order up by this must also window on the day.
    */
   @Column({ type: 'int', nullable: true })
   orderSequence?: number;

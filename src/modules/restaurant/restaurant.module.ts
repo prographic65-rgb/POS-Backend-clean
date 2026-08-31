@@ -5,6 +5,7 @@ import { RestaurantController } from './restaurant.controller';
 import { TablesService } from './tables.service';
 import { RestaurantOrdersService } from './restaurant-orders.service';
 import { RestaurantReportsService } from './restaurant-reports.service';
+import { OrderSequenceResetService } from './order-sequence-reset.service';
 import { RealtimeModule } from '../../realtime/realtime.module';
 import { ShiftsModule } from '../shifts/shifts.module';
 
@@ -16,7 +17,12 @@ import { ShiftsModule } from '../shifts/shifts.module';
     ShiftsModule,
   ],
   controllers: [RestaurantController],
-  providers: [TablesService, RestaurantOrdersService, RestaurantReportsService],
+  providers: [
+    TablesService,
+    RestaurantOrdersService,
+    RestaurantReportsService,
+    OrderSequenceResetService,
+  ],
   exports: [TablesService, RestaurantOrdersService],
 })
 export class RestaurantModule {}
