@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsInt, IsNotEmpty, IsOptional, IsString, Min } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateCategoryDto {
@@ -16,6 +16,16 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsString()
   image: string;
+
+  @ApiProperty({
+    example: 3,
+    required: false,
+    description: 'Menu position, lowest first. Unique per store; omitted = placed last.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
 }
 
 export class UpdateCategoryDto {
@@ -33,4 +43,10 @@ export class UpdateCategoryDto {
   @IsOptional()
   @IsString()
   image: string;
+
+  @ApiProperty({ example: 3, required: false, description: 'Menu position, lowest first. Unique per store.' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
 }

@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsNumber, IsOptional, IsString, Min, IsBoolean } from 'class-validator';
+import { IsNotEmpty, IsNumber, IsOptional, IsString, Min, IsBoolean, IsInt } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateProductDto {
@@ -51,6 +51,16 @@ export class CreateProductDto {
   @IsNotEmpty()
   @IsString()
   categoryId: string;
+
+  @ApiProperty({
+    example: 12,
+    required: false,
+    description: 'Till position, lowest first. Unique per store; omitted = placed last.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
 }
 
 export class UpdateProductDto {
@@ -109,4 +119,10 @@ export class UpdateProductDto {
   @IsNumber()
   @Min(0)
   lowStockAlertQuantity: number;
+
+  @ApiProperty({ example: 12, required: false, description: 'Till position, lowest first. Unique per store.' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  sortOrder?: number;
 }

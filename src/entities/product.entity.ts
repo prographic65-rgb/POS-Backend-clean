@@ -7,12 +7,18 @@ import {
   ManyToOne,
   OneToMany,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { Store } from './store.entity';
 import { Category } from './category.entity';
 import { OrderItem } from './order-item.entity';
 
 @Entity('products')
+/** One slot per number per store; NULL (legacy) rows are exempt. */
+@Index('UQ_products_store_sort_order', ['storeId', 'sortOrder'], {
+  unique: true,
+  where: '"sortOrder" IS NOT NULL',
+})
 export class Product {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -49,6 +55,15 @@ export class Product {
 
   @Column({ default: true })
   isActive: boolean;
+
+  /**
+   * Position on the till, lowest first — across the whole store, not per
+   * category, so "All" and a single category both read in the same order.
+   * Unique within the store; auto-assigned to the end when omitted; NULL on
+   * rows that predate the column, which sort last.
+   */
+  @Column({ type: 'int', nullable: true })
+  sortOrder: number | null;
 
   @ManyToOne(() => Store)
   @JoinColumn({ name: 'storeId' })

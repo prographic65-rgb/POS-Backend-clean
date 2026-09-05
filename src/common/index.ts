@@ -17,3 +17,4 @@ export type { EffectiveRole } from './roles';
 export { CommonModule } from './common.module';
 export { parsePaging, parseOptionalPaging, wantsCount, toPage, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MAX_CATALOGUE_SIZE } from './pagination';
 export type { Page } from './pagination';
+export { SORT_ORDER_FIND_ORDER, isUniqueViolation } from './sort-order';

@@ -19,6 +19,8 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "db:backfill-icons": "ts-node scripts/backfill-icons.ts",
+    "db:backfill-sort": "ts-node scripts/backfill-sort.ts",
     "db:export": "ts-node scripts/export-db.ts",
     "db:import": "ts-node scripts/import-db.ts",
     "db:seed-users": "ts-node scripts/seed-users.ts",
