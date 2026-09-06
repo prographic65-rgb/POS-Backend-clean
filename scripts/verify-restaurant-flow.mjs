@@ -30,6 +30,7 @@ const waiter = { email: `waiter-${stamp}@example.com`, password: 'waiter123' };
 const waiter2 = { email: `waiter2-${stamp}@example.com`, password: 'waiter123' };
 const kitchen = { email: `kitchen-${stamp}@example.com`, password: 'kitchen123' };
 const cashier = { email: `cashier-${stamp}@example.com`, password: 'cashier123' };
+const cashier2 = { email: `cashier2-${stamp}@example.com`, password: 'cashier123' };
 
 // ---------------------------------------------------------------- setup
 const admin = await login(ADMIN.email, ADMIN.password);
@@ -65,6 +66,7 @@ check('create waiter', rWaiter.status === 201, `status ${rWaiter.status}`);
 check('create waiter 2', rWaiter2.status === 201, `status ${rWaiter2.status} ${rWaiter2.body?.message ?? ''}`);
 check('create kitchen', (await mkEmp(kitchen, 'kitchen', 'Chef')).status === 201);
 check('create cashier', (await mkEmp(cashier, 'cashier', 'Cash Desk')).status === 201);
+check('create cashier 2', (await mkEmp(cashier2, 'cashier', 'Second Till')).status === 201);
 
 const badRole = await mkEmp({ email: `bad-${stamp}@x.com`, password: 'pass123' }, 'busser', 'Bus');
 check('restaurant rejects an invalid designation', badRole.status === 400, `status ${badRole.status}`);
@@ -73,6 +75,7 @@ const wAuth = await login(waiter.email, waiter.password);
 const w2Auth = await login(waiter2.email, waiter2.password);
 const kAuth = await login(kitchen.email, kitchen.password);
 const cAuth = await login(cashier.email, cashier.password);
+const c2Auth = await login(cashier2.email, cashier2.password);
 check('waiter effectiveRole', wAuth?.user?.effectiveRole === 'waiter', wAuth?.user?.effectiveRole);
 check('kitchen effectiveRole', kAuth?.user?.effectiveRole === 'kitchen', kAuth?.user?.effectiveRole);
 check('cashier effectiveRole', cAuth?.user?.effectiveRole === 'cashier', cAuth?.user?.effectiveRole);
@@ -147,6 +150,17 @@ const stale = await call('PATCH', `/restaurant/orders/${draft.body.id}/draft`, {
 }, w2Auth.accessToken);
 check('stale draft edit is rejected', stale.status === 409, `status ${stale.status}`);
 
+// Discarding: a draft can be binned by any waiter; a sent order cannot.
+const binMe = await call('POST', '/restaurant/orders', {
+  orderType: 'dine_in', items: [{ productId: p1.body.id, quantity: 1 }], isDraft: true,
+}, wAuth.accessToken);
+const binned = await call('DELETE', `/restaurant/orders/${binMe.body.id}/draft`, undefined, w2Auth.accessToken);
+check('another waiter can discard a draft', binned.status === 200 && binned.body?.discarded === true, `status ${binned.status}`);
+check('a discarded draft is gone',
+  (await call('GET', `/restaurant/orders/${binMe.body.id}`, undefined, wAuth.accessToken)).status === 404);
+check('a sent order cannot be discarded as a draft',
+  (await call('DELETE', `/restaurant/orders/${punch.body.id}/draft`, undefined, wAuth.accessToken)).status === 409);
+
 // ------------------------------------------------------ second round
 const round2 = await call('POST', `/restaurant/orders/${punch.body.id}/items`, {
   items: [{ productId: p2.body.id, quantity: 1, notes: 'Extra spicy' }],
@@ -186,14 +200,65 @@ check('a handed-over order cannot go back to preparing',
   (await call('PATCH', `/restaurant/orders/${punch.body.id}/status`, { orderStatus: 'preparing' }, kAuth.accessToken)).status === 409);
 
 // ------------------------------------------------------------ cashier
-const pct = await call('POST', `/restaurant/orders/${punch.body.id}/settle`, {
-  discountType: 'percent', discountValue: 25, paymentMethod: 'cash',
+// Two steps: the bill is PRINTED first (which fixes the discount and claims
+// the order for that cashier), then marked PAID. One step used to do both,
+// which booked the money the moment the paper came out.
+check('an order cannot be settled before its bill is printed',
+  (await call('POST', `/restaurant/orders/${punch.body.id}/settle`, { paymentMethod: 'cash' }, cAuth.accessToken)).status === 409);
+
+const printed = await call('POST', `/restaurant/orders/${punch.body.id}/print-bill`, {
+  discountType: 'percent', discountValue: 25,
 }, cAuth.accessToken);
-check('cashier settles with 25%', pct.status === 201, `status ${pct.status}`);
-check('25% of 2200 => 550 discount', Number(pct.body?.discount) === 550, String(pct.body?.discount));
+check('cashier prints the bill with 25%', printed.status === 201, `status ${printed.status} ${printed.body?.message ?? ''}`);
+check('printing fixes the discount (25% of 2200 => 550)', Number(printed.body?.discount) === 550, String(printed.body?.discount));
+check('printed bill total is 1650', Number(printed.body?.total) === 1650, String(printed.body?.total));
+check('a printed bill is still unpaid', printed.body?.paymentStatus === 'unpaid' && printed.body?.orderStatus === 'handed_over',
+  `${printed.body?.paymentStatus} / ${printed.body?.orderStatus}`);
+check('printed bill records who printed it',
+  printed.body?.billPrinted === true && printed.body?.billPrintedById === cAuth.user?.id && !!printed.body?.billPrintedAt,
+  `billPrintedById ${printed.body?.billPrintedById}`);
+check('printed bill still occupies its table',
+  (await call('GET', '/restaurant/tables', undefined, wAuth.accessToken)).body?.find((t) => t.id === t1.body.id)?.status === 'reserved');
+
+// The claim: only the printing cashier sees and settles this bill.
+const c2Open = await call('GET', '/restaurant/orders?orderStatus=requested,preparing,handed_over,draft', undefined, c2Auth.accessToken);
+check('another cashier no longer sees the printed bill',
+  Array.isArray(c2Open.body) && !c2Open.body.some((o) => o.id === punch.body.id), `status ${c2Open.status}`);
+const c1Open = await call('GET', '/restaurant/orders?orderStatus=requested,preparing,handed_over,draft', undefined, cAuth.accessToken);
+check('the printing cashier still sees it',
+  Array.isArray(c1Open.body) && c1Open.body.some((o) => o.id === punch.body.id));
+check('another cashier cannot reprint it',
+  (await call('POST', `/restaurant/orders/${punch.body.id}/print-bill`, {}, c2Auth.accessToken)).status === 403);
+check('another cashier cannot settle it',
+  (await call('POST', `/restaurant/orders/${punch.body.id}/settle`, { paymentMethod: 'cash' }, c2Auth.accessToken)).status === 403);
+check('another cashier cannot cancel it',
+  (await call('POST', `/restaurant/orders/${punch.body.id}/cancel`, undefined, c2Auth.accessToken)).status === 403);
+const ownerOpen = await call('GET', '/restaurant/orders?orderStatus=handed_over', undefined, OT);
+check('the owner sees every printed bill',
+  Array.isArray(ownerOpen.body) && ownerOpen.body.some((o) => o.id === punch.body.id));
+
+// Paying charges exactly what was printed — no discount is sent here. This
+// customer pays part by card and the rest in cash, and the split must balance.
+check('a split that does not add up is refused',
+  (await call('POST', `/restaurant/orders/${punch.body.id}/settle`, {
+    paymentMethod: 'partial', split: { cash: 1000, card: 600 },
+  }, cAuth.accessToken)).status === 400);
+const pct = await call('POST', `/restaurant/orders/${punch.body.id}/settle`, {
+  paymentMethod: 'partial', split: { cash: 1000, card: 650 },
+}, cAuth.accessToken);
+check('the printing cashier marks it paid with a split', pct.status === 201, `status ${pct.status} ${pct.body?.message ?? ''}`);
+check('payment charges the printed discount (550)', Number(pct.body?.discount) === 550, String(pct.body?.discount));
 check('total after discount is 1650', Number(pct.body?.total) === 1650, String(pct.body?.total));
+check('the split is stored per method',
+  pct.body?.paymentMethod === 'partial' && Number(pct.body?.paidCash) === 1000 && Number(pct.body?.paidCard) === 650 && Number(pct.body?.paidOnline) === 0,
+  `${pct.body?.paymentMethod} ${pct.body?.paidCash}/${pct.body?.paidCard}/${pct.body?.paidOnline}`);
+check('the response carries the split', pct.body?.paymentSplit?.cash === 1000 && pct.body?.paymentSplit?.card === 650);
 check('settled order is completed', pct.body?.orderStatus === 'completed');
 check('settled order is paid', pct.body?.paymentStatus === 'paid');
+const myTakings = await call('GET', '/shifts/me/dashboard', undefined, cAuth.accessToken);
+check("the cashier's takings count the split by method",
+  Number(myTakings.body?.range?.cash) === 1000 && Number(myTakings.body?.range?.card) === 650,
+  `cash ${myTakings.body?.range?.cash} card ${myTakings.body?.range?.card} (status ${myTakings.status})`);
 // Cash is always taken by a cashier — never by the waiter who opened it.
 check('settled order records who took the money',
   pct.body?.settledById === cAuth.user?.id && !!pct.body?.settledAt,
@@ -209,31 +274,41 @@ check('table freed after settling',
   Array.isArray(freed.body) && freed.body.find((t) => t.id === t1.body.id)?.status === 'free',
   `status ${freed.status}`);
 
-// Flat discount + clamping, on the race-winning order
+// Flat discount, on the race-winning order. Printed by a cashier, settled by
+// the OWNER — the one person allowed to step past another cashier's claim.
 const liveOrder = (ra.status === 201 ? ra : rb).body;
-const flat = await call('POST', `/restaurant/orders/${liveOrder.id}/settle`, {
-  discountType: 'amount', discountValue: 250, paymentMethod: 'card',
+const flatPrint = await call('POST', `/restaurant/orders/${liveOrder.id}/print-bill`, {
+  discountType: 'amount', discountValue: 250,
 }, cAuth.accessToken);
-check('flat 250 discount applied', Number(flat.body?.discount) === 250, String(flat.body?.discount));
+check('flat 250 discount fixed at print time', Number(flatPrint.body?.discount) === 250, String(flatPrint.body?.discount));
+const flat = await call('POST', `/restaurant/orders/${liveOrder.id}/settle`, { paymentMethod: 'card' }, OT);
+check('the owner can settle a bill another cashier printed', flat.status === 201, `status ${flat.status} ${flat.body?.message ?? ''}`);
 check('total after flat discount (500-250)', Number(flat.body?.total) === 250, String(flat.body?.total));
+check('the owner is recorded as the settler', flat.body?.settledById === ownerAuth.user?.id);
 
-// Over-large discount must clamp, never go negative
+// Reprinting is how the discount changes; over-large discounts clamp.
 const takeaway = await call('POST', '/restaurant/orders', {
   orderType: 'takeaway', items: [{ productId: p1.body.id, quantity: 1 }], customerName: 'Walk-in',
 }, cAuth.accessToken);
 check('cashier creates a takeaway order with no table', takeaway.status === 201 && takeaway.body?.tableId === null);
-const over = await call('POST', `/restaurant/orders/${takeaway.body.id}/settle`, {
+check('a takeaway can be billed while the kitchen still has it',
+  (await call('POST', `/restaurant/orders/${takeaway.body.id}/print-bill`, { discountType: 'amount', discountValue: 100 }, cAuth.accessToken)).status === 201);
+const over = await call('POST', `/restaurant/orders/${takeaway.body.id}/print-bill`, {
   discountType: 'amount', discountValue: 999999,
 }, cAuth.accessToken);
+check('the same cashier can reprint with a different discount', over.status === 201, `status ${over.status}`);
 check('excessive discount clamps to subtotal', Number(over.body?.discount) === 500, String(over.body?.discount));
 check('total never goes negative', Number(over.body?.total) === 0, String(over.body?.total));
+check('takeaway settles at the reprinted figure',
+  Number((await call('POST', `/restaurant/orders/${takeaway.body.id}/settle`, { paymentMethod: 'cash' }, cAuth.accessToken)).body?.total) === 0);
 
 // Delivery requires an address
 check('delivery without an address is rejected',
   (await call('POST', '/restaurant/orders', { orderType: 'delivery', items: [{ productId: p1.body.id, quantity: 1 }] }, cAuth.accessToken)).status === 400);
 
 // ----------------------------------------------------------- dine_out
-// Eating in AND taking a parcel: one order, one bill, one table.
+// Eating in AND taking a parcel: one order, one bill, one table. The type is
+// DERIVED from the parcel marks — the waiter no longer picks it up front.
 check('dine_out without a table is rejected',
   (await call('POST', '/restaurant/orders', {
     orderType: 'dine_out', items: [{ productId: p1.body.id, quantity: 1 }],
@@ -241,14 +316,16 @@ check('dine_out without a table is rejected',
 
 const t3 = await call('POST', '/restaurant/tables', { name: 'Table 3' }, OT);
 const dineOut = await call('POST', '/restaurant/orders', {
-  orderType: 'dine_out',
+  // Sent as dine_in on purpose: the parcel line must make it a dine_out.
+  orderType: 'dine_in',
   tableId: t3.body.id,
   items: [
     { productId: p1.body.id, quantity: 1 },
     { productId: p2.body.id, quantity: 1, isParcel: true },
   ],
 }, wAuth.accessToken);
-check('waiter punches a dine_out order', dineOut.status === 201, `status ${dineOut.status}`);
+check('waiter punches a seated order with a parcel line', dineOut.status === 201, `status ${dineOut.status}`);
+check('a parcel line makes the order dine_out', dineOut.body?.orderType === 'dine_out', dineOut.body?.orderType);
 // The bug this guards: the tableId used to be nulled for anything that was
 // not literally 'dine_in', stranding the order with no table.
 check('dine_out keeps its table', dineOut.body?.tableId === t3.body.id, String(dineOut.body?.tableId));
@@ -260,6 +337,75 @@ check('the parcel flag round-trips per line',
   String((dineOut.body?.items ?? []).map((i) => i.isParcel)));
 check('non-parcel lines stay unmarked',
   (dineOut.body?.items ?? []).some((i) => i.isParcel === false));
+
+const t4 = await call('POST', '/restaurant/tables', { name: 'Table 4' }, OT);
+const plainSeated = await call('POST', '/restaurant/orders', {
+  orderType: 'dine_out', // claimed dine_out, but nothing is packed
+  tableId: t4.body.id,
+  items: [{ productId: p1.body.id, quantity: 1 }],
+}, wAuth.accessToken);
+check('no parcel line means dine_in, whatever the client said', plainSeated.body?.orderType === 'dine_in', plainSeated.body?.orderType);
+const parcelRound = await call('POST', `/restaurant/orders/${plainSeated.body.id}/items`, {
+  items: [{ productId: p2.body.id, quantity: 1, isParcel: true }],
+}, wAuth.accessToken);
+check('a parcel in a later round turns the order dine_out', parcelRound.body?.orderType === 'dine_out', parcelRound.body?.orderType);
+
+// ------------------------------------------------------------- drinks
+// Drinks are poured at the counter. They are billed like anything else but
+// never reach the kitchen: not on the ticket, not on the board.
+const drinks = await call('POST', '/categories', { name: 'Drinks', storeId }, OT);
+const cola = await call('POST', '/products', { name: 'Cola', price: 100, costPrice: 40, categoryId: drinks.body?.id, storeId }, OT);
+check('owner creates a Drinks category and a drink', drinks.status === 201 && cola.status === 201);
+
+const t5 = await call('POST', '/restaurant/tables', { name: 'Table 5' }, OT);
+const drinksOnly = await call('POST', '/restaurant/orders', {
+  orderType: 'dine_in', tableId: t5.body.id,
+  items: [{ productId: cola.body.id, quantity: 2 }],
+}, wAuth.accessToken);
+check('a drinks-only order skips the kitchen entirely', drinksOnly.body?.orderStatus === 'handed_over', drinksOnly.body?.orderStatus);
+check('drink lines are stamped skipKitchen', drinksOnly.body?.items?.every((i) => i.skipKitchen === true));
+check('a drinks-only order still holds its table',
+  (await call('GET', '/restaurant/tables', undefined, wAuth.accessToken)).body?.find((t) => t.id === t5.body.id)?.status === 'reserved');
+const board = await call('GET', '/restaurant/orders?orderStatus=requested,preparing', undefined, kAuth.accessToken);
+check('the kitchen board never lists it', !board.body?.some((o) => o.id === drinksOnly.body.id));
+
+const foodRound = await call('POST', `/restaurant/orders/${drinksOnly.body.id}/items`, {
+  items: [{ productId: p1.body.id, quantity: 1 }],
+}, wAuth.accessToken);
+check('a food round on it goes to the kitchen', foodRound.body?.orderStatus === 'requested', foodRound.body?.orderStatus);
+check('the food line is not skipKitchen', foodRound.body?.items?.some((i) => i.skipKitchen === false));
+await call('PATCH', `/restaurant/orders/${drinksOnly.body.id}/status`, { orderStatus: 'handed_over' }, kAuth.accessToken);
+const drinkRound = await call('POST', `/restaurant/orders/${drinksOnly.body.id}/items`, {
+  items: [{ productId: cola.body.id, quantity: 1 }],
+}, wAuth.accessToken);
+check('a drinks round on a finished order does not reopen the kitchen', drinkRound.body?.orderStatus === 'handed_over', drinkRound.body?.orderStatus);
+check('the drinks round is billed (2x100 + 500 + 100)', Number(drinkRound.body?.total) === 800, String(drinkRound.body?.total));
+
+// A round added after the bill was printed invalidates the bill.
+const stalePrint = await call('POST', `/restaurant/orders/${drinksOnly.body.id}/print-bill`, {}, cAuth.accessToken);
+check('cashier prints the bill', stalePrint.body?.billPrinted === true);
+const afterPrint = await call('POST', `/restaurant/orders/${drinksOnly.body.id}/items`, {
+  items: [{ productId: cola.body.id, quantity: 1 }],
+}, wAuth.accessToken);
+check('adding to a printed bill releases the claim', afterPrint.body?.billPrinted === false && afterPrint.body?.billPrintedById === null,
+  `${afterPrint.body?.billPrinted} / ${afterPrint.body?.billPrintedById}`);
+check('and the order is back in front of every cashier',
+  (await call('GET', '/restaurant/orders?orderStatus=handed_over', undefined, c2Auth.accessToken)).body?.some((o) => o.id === drinksOnly.body.id));
+check('settling a released bill is refused until it is printed again',
+  (await call('POST', `/restaurant/orders/${drinksOnly.body.id}/settle`, {}, cAuth.accessToken)).status === 409);
+
+// ----------------------------------------------------------- delivery
+const delivery = await call('POST', '/restaurant/orders', {
+  orderType: 'delivery', items: [{ productId: p1.body.id, quantity: 1 }],
+  customerName: 'Sana', customerPhone: '0300-0000000', deliveryAddress: '12 Main Street',
+}, cAuth.accessToken);
+check('cashier creates a delivery order', delivery.status === 201, `status ${delivery.status}`);
+check('a delivery bill needs the rider name',
+  (await call('POST', `/restaurant/orders/${delivery.body.id}/print-bill`, {}, cAuth.accessToken)).status === 400);
+const riderBill = await call('POST', `/restaurant/orders/${delivery.body.id}/print-bill`, { riderName: 'Bilal' }, cAuth.accessToken);
+check('the rider is recorded on the bill', riderBill.body?.riderName === 'Bilal', String(riderBill.body?.riderName));
+check('a reprint keeps the rider when none is sent',
+  (await call('POST', `/restaurant/orders/${delivery.body.id}/print-bill`, {}, cAuth.accessToken)).body?.riderName === 'Bilal');
 
 // ------------------------------------------------------------ reports
 const report = await call('GET', '/restaurant/reports/sales', undefined, OT);

@@ -49,6 +49,18 @@ export class Category {
   @Column({ type: 'int', nullable: true })
   sortOrder: number | null;
 
+  /**
+   * Nothing in this category needs cooking — it is served straight from the
+   * counter, like drinks — so its lines are never sent to the kitchen.
+   *
+   * Categories NAMED Drinks/Beverages skip the kitchen automatically (see
+   * common/kitchen-routing.ts); this flag is how an owner extends that to any
+   * other category. `default: false` keeps every existing row unchanged and
+   * lets `synchronize` add the column to a populated table.
+   */
+  @Column({ default: false })
+  skipKitchen: boolean;
+
   @ManyToOne(() => Store)
   @JoinColumn({ name: 'storeId' })
   store: Store;

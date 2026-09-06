@@ -97,6 +97,25 @@ export class Store {
   @Column({ type: 'varchar', length: 500, nullable: true })
   logoUrl?: string | null;
 
+  /**
+   * The logo bytes themselves, served by GET /stores/:id/logo.
+   *
+   * Kept in the database rather than on disk because production runs on a
+   * container with an EPHEMERAL filesystem: every deploy started from a clean
+   * image, so a logo written to `uploads/` vanished at the next release while
+   * `logoUrl` kept pointing at it. The browser then received a JSON 404 where
+   * it expected an image, which Chrome reports as ERR_BLOCKED_BY_ORB.
+   *
+   * `select: false` keeps the ~500 KB out of every ordinary `GET /stores/:id`
+   * — both clients call that to build receipt headers, and neither wants the
+   * image inline. Only the logo endpoint selects it explicitly.
+   */
+  @Column({ type: 'bytea', nullable: true, select: false })
+  logoData?: Buffer | null;
+
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  logoMimeType?: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

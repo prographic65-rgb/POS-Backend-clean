@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -164,6 +165,62 @@ export class UpdateOrderStatusDto {
   orderStatus: 'preparing' | 'handed_over';
 }
 
+/**
+ * Printing the bill — the step BEFORE money changes hands.
+ *
+ * The discount is fixed here, because it is what gets printed; settling
+ * afterwards charges exactly the printed figure. To change it, print again.
+ */
+export class PrintBillDto {
+  @ApiPropertyOptional({ enum: ['amount', 'percent'] })
+  @IsOptional()
+  @IsIn(['amount', 'percent'])
+  discountType?: 'amount' | 'percent';
+
+  @ApiPropertyOptional({ example: 250, description: 'Raw figure: 250 for flat, 25 for 25%.' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  discountValue?: number;
+
+  @ApiPropertyOptional({
+    example: 'Bilal',
+    description: 'Required on a delivery order: who carries it. Printed on the bill.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  riderName?: string;
+}
+
+/** How a partial payment was split. Amounts, not percentages; must sum to the total. */
+export class PaymentSplitDto {
+  @ApiPropertyOptional({ example: 1000 })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  cash?: number;
+
+  @ApiPropertyOptional({ example: 500 })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  card?: number;
+
+  @ApiPropertyOptional({ example: 150 })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  online?: number;
+}
+
+/**
+ * Taking the money. The bill must already have been printed, by this cashier.
+ *
+ * The discount fields are accepted for older clients that still settle in one
+ * step; a client built for the print-then-pay flow omits them and the figure
+ * fixed at print time is charged.
+ */
 export class SettleOrderDto {
   @ApiPropertyOptional({ enum: ['amount', 'percent'] })
   @IsOptional()
@@ -176,8 +233,20 @@ export class SettleOrderDto {
   @Min(0)
   discountValue?: number;
 
-  @ApiPropertyOptional({ enum: ['cash', 'card', 'check', 'online'] })
+  @ApiPropertyOptional({
+    enum: ['cash', 'card', 'check', 'online', 'partial'],
+    description: "'partial' = more than one method; send the amounts in `split`.",
+  })
   @IsOptional()
-  @IsIn(['cash', 'card', 'check', 'online'])
+  @IsIn(['cash', 'card', 'check', 'online', 'partial'])
   paymentMethod?: string;
+
+  @ApiPropertyOptional({
+    type: PaymentSplitDto,
+    description: 'Required with paymentMethod=partial. Must add up to the printed total.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PaymentSplitDto)
+  split?: PaymentSplitDto;
 }

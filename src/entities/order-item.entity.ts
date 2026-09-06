@@ -80,4 +80,18 @@ export class OrderItem {
    */
   @Column({ type: 'timestamp', nullable: true })
   sentAt?: Date;
+
+  /**
+   * This line is served from the counter, not cooked — a drink. It never
+   * appears on a kitchen ticket or the kitchen board, and an order made only
+   * of such lines never goes to the kitchen at all.
+   *
+   * Snapshotted from the product's category at order time (see
+   * common/kitchen-routing.ts) rather than looked up live: re-flagging a
+   * category tomorrow must not change what the kitchen was told today.
+   *
+   * `default: false` is load-bearing — see `isParcel` above.
+   */
+  @Column({ default: false })
+  skipKitchen: boolean;
 }

@@ -495,10 +495,16 @@ and the caller has no open drawer.
 |---|---|---|---|
 | PATCH | `/stores/:id/settings` | owner | `{ name?, address?, phone?, email?, shiftsEnabled? }`. `shiftsEnabled: true` is rejected for non-restaurant accounts |
 | POST | `/stores/:id/logo` | owner | `multipart/form-data`, field `logo`. PNG/JPEG/WebP, max 500 KB. **413** if larger, **400** if another type |
-| DELETE | `/stores/:id/logo` | owner | Removes the file and clears `logoUrl` |
+| DELETE | `/stores/:id/logo` | owner | Removes the logo and clears `logoUrl` |
+| GET | `/stores/:id/logo` | public (no token) | The image bytes with their content type. **Empty** 404 when there is none — never JSON, so an `<img>` is not blocked by the browser (ORB) |
 
-`logoUrl` is server-relative (`/uploads/logo/<id>-<ts>.png`); clients join it
-onto their own API base URL. Files are served from `/api/uploads/…`.
+`logoUrl` is server-relative (`/stores/<id>/logo?v=<ts>`); clients join it onto
+their own API base URL. The bytes live in the database (`stores.logoData`,
+never selected by other endpoints), because production runs on a container
+whose disk is recreated on every deploy — logos written to `uploads/` vanished
+at the next release. Rows from before that move still carry
+`/uploads/logo/…`; those paths answer an empty 404 until the owner uploads
+again.
 
 `GET /auth/me` additionally returns `storeName`, `logoUrl` and `shiftsEnabled`,
 so clients do not have to fetch the store to render an identity or decide
@@ -516,8 +522,60 @@ draft → requested → preparing → handed_over → completed
   `handed_over`, and validates the transition (409 otherwise). The kitchen
   cannot set `completed` — that means paid and table freed, which only
   settling may do.
-- The cashier may settle from any live status; `handed_over` is simply what
-  their screen highlights as ready to bill.
+- `handed_over` is simply what the cashier's screen highlights as ready to
+  bill; billing itself is allowed from any live status, because a takeaway or
+  delivery is billed the moment it is ordered.
+
+- `DELETE /restaurant/orders/:id/draft` (waiter, cashier, owner) discards a
+  draft outright — it reserved no table and took no money, so nothing is kept.
+  **409** once the order has been sent to the kitchen; that is the cashier's
+  cancel.
+
+**Drinks never reach the kitchen.** A line whose product sits in a category
+that is flagged `skipKitchen`, or is named *Drinks*/*Beverages*, is stamped
+`skipKitchen: true` on the order line. Such lines are billed like any other
+but are left off kitchen tickets, and an order (or a further round) made only
+of them never goes on the kitchen board: it opens straight in `handed_over`,
+and a drinks-only round on a finished order leaves it there. `orderCreated`
+is still emitted (the till needs it); `orderItemsAdded` is emitted only when
+the round contains something to cook, with `newItems` holding just those lines.
+
+**Dine-in versus dine-out is derived.** A seated order is `dine_out` when any
+line has `isParcel: true` and `dine_in` otherwise, whatever type the client
+sent; adding a parcel line in a later round upgrades the order.
+
+### Billing: print first, then pay
+
+Taking payment is two calls, matching how a restaurant works — the bill goes
+to the customer first, the money is booked when it arrives:
+
+| Method | Endpoint | Who | Notes |
+|---|---|---|---|
+| POST | `/restaurant/orders/:id/print-bill` | cashier, owner | `{ discountType?, discountValue?, riderName? }`. Fixes the discount, stamps `billPrintedById`/`billPrintedAt`, and **claims** the order for the caller. `riderName` is required on a delivery (**400**) and printed on the bill. Calling again is a reprint — the only way to change the discount |
+| POST | `/restaurant/orders/:id/settle` | cashier, owner | `{ paymentMethod?, split? }`. **409** until the bill is printed. Charges the printed figure (older clients may still send discount fields). Completes the order, frees the table, stamps the shift |
+
+**Split payments.** `paymentMethod: 'partial'` with
+`split: { cash?, card?, online? }` records a customer paying by more than one
+method. The amounts must add up to the bill to the cent (**400** otherwise);
+a split that turns out to be one method is stored as that method. Every paid
+order carries `paidCash` / `paidCard` / `paidOnline` (the whole total on one
+column for a single method) and, when partial, a `paymentSplit` object. Shift
+totals and the cashier dashboard sum those columns, so a split lands in each
+bucket separately — which is what lets the cashier hand the owner an exact
+per-method figure at the end of the shift.
+| POST | `/restaurant/orders/:id/cancel` | cashier, owner | Same claim rule as settle |
+
+**The claim.** Until a bill is printed, every cashier sees the order. Once
+printed, `GET /restaurant/orders` for a *cashier* omits it unless they printed
+it (`billPrintedById IS NULL OR = caller`), and reprint/settle/cancel by another
+cashier return **403** naming who holds it. Owners always see and may act on
+everything. A waiter adding a round to a printed bill clears the claim and the
+discount, and the order goes back in front of every cashier to be printed again.
+
+Responses carry `billPrinted`, `billPrintedByName`, `billPrintedAt` and
+`riderName`. `GET /restaurant/orders` also accepts `billPrinted=true|false`.
+"Bill printed" is a display state on the clients, not a member of
+`orderStatus` — the kitchen lifecycle is untouched by billing.
 
 **Order types**: `dine_in`, `dine_out`, `takeaway`, `delivery`. `dine_out` is a
 dine-in order that also takes a parcel home — it requires a table exactly like

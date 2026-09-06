@@ -13,17 +13,21 @@ import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagg
 import { JwtAuthGuard } from '@/auth/jwt-auth.guard';
 import { Roles, RolesGuard, CurrentUser, TenantService, parsePaging, wantsCount } from '@/common';
 import { TablesService } from './tables.service';
-import { RestaurantOrdersService } from './restaurant-orders.service';
+import { RestaurantOrdersService, type OrderViewer } from './restaurant-orders.service';
 import { RestaurantReportsService } from './restaurant-reports.service';
 import {
   AddOrderItemsDto,
   CreateRestaurantOrderDto,
   CreateTableDto,
+  PrintBillDto,
   SettleOrderDto,
   UpdateDraftOrderDto,
   UpdateOrderStatusDto,
   UpdateTableDto,
 } from './dto';
+
+/** Who is asking, as the orders service needs it: id plus effective role. */
+const viewerOf = (user: any): OrderViewer => ({ userId: user.id, role: user.effectiveRole });
 
 /**
  * Every route is gated twice: RolesGuard checks the effective role, and
@@ -79,6 +83,11 @@ export class RestaurantController {
 
   // ------------------------------------------------------------- orders
 
+  /**
+   * A cashier's list omits bills another cashier has printed — see
+   * RestaurantOrdersService.baseQuery. Owners, waiters and the kitchen see
+   * everything their filters ask for.
+   */
   @Get('orders')
   @Roles('restaurant_owner', 'waiter', 'kitchen', 'cashier')
   @ApiOperation({ summary: 'List restaurant orders' })
@@ -88,20 +97,22 @@ export class RestaurantController {
     @Query('orderType') orderType?: string,
     @Query('tableId') tableId?: string,
     @Query('search') search?: string,
+    @Query('billPrinted') billPrinted?: string,
     @Query('skip') skip?: string,
     @Query('take') take?: string,
     @Query('withCount') withCount?: string,
   ) {
     const store = await this.tenantService.requireRestaurantStore(user);
-    const filters = { orderStatus, orderType, tableId, search };
+    const filters = { orderStatus, orderType, tableId, search, billPrinted };
+    const viewer = viewerOf(user);
 
     // Opt-in envelope. The kitchen and cashier live views deliberately fetch
     // the complete open set — a ticket pushed onto "page 2" is a ticket that
     // gets missed — so they call without these params and still get an array.
     if (wantsCount(withCount)) {
-      return this.ordersService.findAllPaged(store.id, filters, parsePaging(skip, take));
+      return this.ordersService.findAllPaged(store.id, filters, parsePaging(skip, take), viewer);
     }
-    return this.ordersService.findAll(store.id, filters);
+    return this.ordersService.findAll(store.id, filters, viewer);
   }
 
   @Get('orders/:id')
@@ -109,7 +120,7 @@ export class RestaurantController {
   @ApiOperation({ summary: 'Get one restaurant order' })
   async getOrder(@CurrentUser() user: any, @Param('id') id: string) {
     const store = await this.tenantService.requireRestaurantStore(user);
-    return this.ordersService.findOne(id, store.id);
+    return this.ordersService.findOne(id, store.id, viewerOf(user));
   }
 
   /** Waiters punch dine-in and dine-out; cashiers take takeaway and delivery. */
@@ -135,6 +146,16 @@ export class RestaurantController {
     return this.ordersService.updateDraft(id, store.id, dto);
   }
 
+  /** Drafts are scratch, so any waiter may bin one — no money or table is involved. */
+  @Delete('orders/:id/draft')
+  @Roles('waiter', 'cashier', 'restaurant_owner')
+  @ApiOperation({ summary: 'Discard a draft that was never sent to the kitchen' })
+  @ApiResponse({ status: 409, description: 'The order is no longer a draft' })
+  async discardDraft(@CurrentUser() user: any, @Param('id') id: string) {
+    const store = await this.tenantService.requireRestaurantStore(user);
+    return this.ordersService.discardDraft(id, store.id);
+  }
+
   @Post('orders/:id/punch')
   @Roles('waiter', 'cashier', 'restaurant_owner')
   @ApiOperation({ summary: 'Send a draft to the kitchen and claim its table' })
@@ -150,7 +171,9 @@ export class RestaurantController {
 
   @Post('orders/:id/items')
   @Roles('waiter', 'cashier', 'restaurant_owner')
-  @ApiOperation({ summary: 'Append another round to a live order' })
+  @ApiOperation({
+    summary: 'Append another round to a live order. Drinks lines never reach the kitchen.',
+  })
   async addItems(
     @CurrentUser() user: any,
     @Param('id') id: string,
@@ -176,29 +199,55 @@ export class RestaurantController {
   }
 
   /**
-   * Cash is always taken by a cashier, so the caller is recorded as the
-   * settler — and, when the tenant has shifts on, must have an open drawer.
+   * Step one of taking payment: the bill is printed and the order is claimed
+   * by this cashier. Calling it again reprints (and re-fixes the discount).
+   */
+  @Post('orders/:id/print-bill')
+  @Roles('cashier', 'restaurant_owner')
+  @ApiOperation({
+    summary: 'Fix the discount, record the rider on a delivery, and claim the order for this cashier',
+  })
+  @ApiResponse({ status: 400, description: 'A delivery bill needs the rider name' })
+  @ApiResponse({ status: 403, description: 'Another cashier already printed this bill' })
+  async printBill(
+    @CurrentUser() user: any,
+    @Param('id') id: string,
+    @Body() dto: PrintBillDto,
+  ) {
+    const store = await this.tenantService.requireRestaurantStore(user);
+    return this.ordersService.printBill(id, store.id, dto, viewerOf(user));
+  }
+
+  /**
+   * Step two: the money. Cash is always taken by a cashier, so the caller is
+   * recorded as the settler — and, when the tenant has shifts on, must have an
+   * open drawer. Only the cashier who printed the bill (or an owner) may.
    */
   @Post('orders/:id/settle')
   @Roles('cashier', 'restaurant_owner')
-  @ApiOperation({ summary: 'Apply a discount, take payment, complete, and free the table' })
-  @ApiResponse({ status: 409, description: 'Shifts are on and the cashier has none open' })
+  @ApiOperation({ summary: 'Mark a printed bill paid, complete the order, and free the table' })
+  @ApiResponse({ status: 403, description: 'Another cashier printed this bill' })
+  @ApiResponse({
+    status: 409,
+    description: 'The bill has not been printed, or shifts are on and the cashier has none open',
+  })
   async settle(
     @CurrentUser() user: any,
     @Param('id') id: string,
     @Body() dto: SettleOrderDto,
   ) {
     const store = await this.tenantService.requireRestaurantStore(user);
-    return this.ordersService.settle(id, store.id, dto, user.id);
+    return this.ordersService.settle(id, store.id, dto, viewerOf(user));
   }
 
   /** Deliberately excludes the kitchen — cancelling is a money decision. */
   @Post('orders/:id/cancel')
   @Roles('cashier', 'restaurant_owner')
   @ApiOperation({ summary: 'Cancel an order and free its table' })
+  @ApiResponse({ status: 403, description: 'Another cashier printed this bill' })
   async cancel(@CurrentUser() user: any, @Param('id') id: string) {
     const store = await this.tenantService.requireRestaurantStore(user);
-    return this.ordersService.cancel(id, store.id);
+    return this.ordersService.cancel(id, store.id, viewerOf(user));
   }
 
   // ------------------------------------------------------------ reports

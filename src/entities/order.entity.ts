@@ -180,6 +180,38 @@ export class Order {
   shiftId?: string | null;
 
   /**
+   * Bill printing, separated from payment.
+   *
+   * A restaurant prints the bill FIRST and takes the money afterwards, and the
+   * two are done by the same cashier. These columns record the first half:
+   * who printed, and when. They are deliberately NOT a member of `orderStatus`
+   * — that enum is the kitchen's lifecycle, and a bill is routinely printed
+   * while the kitchen is still cooking (every takeaway pays up front), so
+   * folding "bill printed" into it would pull a live ticket off the board.
+   *
+   * Printing a bill CLAIMS the order for that cashier: from then on only they
+   * (or an owner) can see it on the till, reprint it, settle it or cancel it,
+   * so two tills can never both collect for the same table. Adding a further
+   * round clears the claim, because the printed bill is no longer right.
+   */
+  @Column('uuid', { nullable: true })
+  billPrintedById?: string | null;
+
+  @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'billPrintedById' })
+  billPrintedBy?: User | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  billPrintedAt?: Date | null;
+
+  /**
+   * Who is carrying a delivery order. Captured when the bill is printed and
+   * printed on it, so the paper the rider takes says which rider took it.
+   */
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  riderName?: string | null;
+
+  /**
    * PAYMENT status. Exposed to newer clients as `paymentStatus` via a response
    * alias; the column keeps this name deliberately.
    *
@@ -262,13 +294,41 @@ export class Order {
   @Column({ nullable: true })
   notes: string;
 
+  /**
+   * How the order was paid. 'partial' means the customer paid with more than
+   * one method and the split is in `paidCash` / `paidCard` / `paidOnline`.
+   *
+   * ADDING A MEMBER here is safe: no index or view depends on this enum, so
+   * TypeORM's rename-and-retype dance completes. (Contrast `orderStatus`
+   * above, whose partial index makes the same change a boot failure.)
+   */
   @Column({
     type: 'enum',
-    enum: ['cash', 'card', 'check', 'online'],
+    enum: ['cash', 'card', 'check', 'online', 'partial'],
     default: 'cash',
     nullable: true,
   })
-  paymentMethod: 'cash' | 'card' | 'check' | 'online';
+  paymentMethod: 'cash' | 'card' | 'check' | 'online' | 'partial';
+
+  /**
+   * How much of `total` arrived by each method.
+   *
+   * A customer often pays part by card and the rest in cash, and the cashier
+   * must hand the owner an exact per-method figure at the end of the shift —
+   * so the split is stored, not just the fact that it was split. For a
+   * single-method payment the matching column simply holds the whole total,
+   * and the shift report sums these columns rather than guessing from
+   * `paymentMethod`. `default: 0` lets `synchronize` add the columns to a
+   * populated table.
+   */
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  paidCash: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  paidCard: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  paidOnline: number;
 
   /**
    * Optimistic lock. Drafts are shared across waiters, so two people can open

@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import type { Request, Response } from 'express';
 import { promises as fs } from 'fs';
 import { AppModule } from './app.module';
 import { UPLOAD_DIR, LOGO_DIR } from './modules/stores/stores.service';
@@ -55,6 +56,20 @@ async function bootstrap() {
     maxAge: '7d',
     index: false,
     dotfiles: 'deny',
+  });
+
+  /**
+   * Legacy logo paths whose file is gone answer with an EMPTY 404.
+   *
+   * Logos now live in the database (GET /stores/:id/logo), because this
+   * container's disk is wiped on every deploy. Rows written before that still
+   * point at `/uploads/logo/...`; without this handler such a request fell
+   * through to Nest's JSON 404, and a browser that asked for an image and got
+   * `application/json` refuses to hand it over — Chrome logs it as
+   * ERR_BLOCKED_BY_ORB. An empty 404 is a plain broken image the UI hides.
+   */
+  app.use('/api/uploads', (_req: Request, res: Response) => {
+    res.status(404).end();
   });
 
   // Swagger configuration

@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository, SelectQueryBuilder } from 'typeorm';
 import { CashierShift, Order, Store } from '../../entities';
 import { round2 } from '../../common/discount';
 import { toPage, type Page } from '../../common/pagination';
@@ -23,6 +23,52 @@ export interface ShiftTotals {
   orderCount: number;
   cashPaidOut: number;
   expectedCash: number;
+}
+
+/**
+ * Takings by method over whatever paid orders the query builder narrows to.
+ *
+ * One aggregate query rather than loading rows: a busy shift has hundreds of
+ * orders and the cashier's header polls this.
+ *
+ * A 'partial' payment contributes its `paidCash` / `paidCard` / `paidOnline`
+ * to each bucket separately — that split is the whole reason it is stored,
+ * so the cashier can hand the owner an exact per-method figure. Every other
+ * method puts its full total in one bucket, which also covers rows written
+ * before the split columns existed. 'check' and a legacy NULL land in
+ * `other`: not cash, so never handed over as notes, but still takings.
+ */
+async function sumByMethod(
+  qb: SelectQueryBuilder<Order>,
+): Promise<{ cash: number; card: number; online: number; other: number; count: number }> {
+  const bucket = (method: 'cash' | 'card' | 'online', column: string) =>
+    `COALESCE(SUM(CASE
+        WHEN order.paymentMethod = 'partial' THEN order.${column}
+        WHEN order.paymentMethod = '${method}' THEN order.total
+        ELSE 0 END), 0)`;
+
+  const row = await qb
+    .select(bucket('cash', 'paidCash'), 'cash')
+    .addSelect(bucket('card', 'paidCard'), 'card')
+    .addSelect(bucket('online', 'paidOnline'), 'online')
+    .addSelect(
+      `COALESCE(SUM(CASE
+          WHEN order.paymentMethod IN ('partial', 'cash', 'card', 'online') THEN 0
+          ELSE order.total END), 0)`,
+      'other',
+    )
+    .addSelect('COUNT(order.id)', 'count')
+    .getRawOne<{ cash: string; card: string; online: string; other: string; count: string }>();
+
+  // Postgres returns SUM as a string and COUNT as a bigint string; both
+  // concatenate instead of adding unless coerced.
+  return {
+    cash: round2(Number(row?.cash) || 0),
+    card: round2(Number(row?.card) || 0),
+    online: round2(Number(row?.online) || 0),
+    other: round2(Number(row?.other) || 0),
+    count: Number(row?.count) || 0,
+  };
 }
 
 /** What settle()/create() must stamp onto an order. */
@@ -160,45 +206,18 @@ export class ShiftsService {
     manager: EntityManager,
     shift: Pick<CashierShift, 'id' | 'openingFloat'>,
   ): Promise<ShiftTotals> {
-    const salesRows: Array<{ paymentMethod: string | null; count: string; sum: string }> =
-      await manager
+    const sales = await sumByMethod(
+      manager
         .createQueryBuilder(Order, 'order')
-        .select('order.paymentMethod', 'paymentMethod')
-        .addSelect('COUNT(order.id)', 'count')
-        .addSelect('COALESCE(SUM(order.total), 0)', 'sum')
         .where('order.shiftId = :shiftId', { shiftId: shift.id })
-        .andWhere("order.status = 'paid'")
-        .groupBy('order.paymentMethod')
-        .getRawMany();
+        .andWhere("order.status = 'paid'"),
+    );
 
-    let cashSales = 0;
-    let cardSales = 0;
-    let onlineSales = 0;
-    let otherSales = 0;
-    let orderCount = 0;
-
-    for (const row of salesRows) {
-      // Postgres returns SUM as a string and COUNT as a bigint string; both
-      // concatenate instead of adding unless coerced.
-      const sum = Number(row.sum) || 0;
-      orderCount += Number(row.count) || 0;
-
-      switch (row.paymentMethod) {
-        case 'cash':
-          cashSales += sum;
-          break;
-        case 'card':
-          cardSales += sum;
-          break;
-        case 'online':
-          onlineSales += sum;
-          break;
-        default:
-          // 'check' and any legacy NULL. Not cash, so it is not handed over as
-          // notes, but it still belongs in the shift's takings.
-          otherSales += sum;
-      }
-    }
+    const cashSales = sales.cash;
+    const cardSales = sales.card;
+    const onlineSales = sales.online;
+    const otherSales = sales.other;
+    const orderCount = sales.count;
 
     const paidOutRow = await manager.query(
       `SELECT COALESCE(SUM("amount"), 0) AS sum
@@ -418,38 +437,23 @@ export class ShiftsService {
   async myDashboard(storeId: string, userId: string, from?: string, to?: string) {
     const qb = this.dataSource
       .createQueryBuilder(Order, 'order')
-      .select('order.paymentMethod', 'paymentMethod')
-      .addSelect('COUNT(order.id)', 'count')
-      .addSelect('COALESCE(SUM(order.total), 0)', 'sum')
       .where('order.storeId = :storeId', { storeId })
       .andWhere('order.settledById = :userId', { userId })
-      .andWhere("order.status = 'paid'")
-      .groupBy('order.paymentMethod');
+      .andWhere("order.status = 'paid'");
 
     if (from) qb.andWhere('order.settledAt >= :from', { from: new Date(from) });
     if (to) qb.andWhere('order.settledAt <= :to', { to: new Date(to) });
 
-    const rows: Array<{ paymentMethod: string | null; count: string; sum: string }> =
-      await qb.getRawMany();
+    const sales = await sumByMethod(qb);
 
     const range = {
-      cash: 0,
-      card: 0,
-      online: 0,
-      other: 0,
-      total: 0,
-      orderCount: 0,
+      cash: sales.cash,
+      card: sales.card,
+      online: sales.online,
+      other: sales.other,
+      total: sales.cash + sales.card + sales.online + sales.other,
+      orderCount: sales.count,
     };
-
-    for (const row of rows) {
-      const sum = Number(row.sum) || 0;
-      range.orderCount += Number(row.count) || 0;
-      range.total += sum;
-      if (row.paymentMethod === 'cash') range.cash += sum;
-      else if (row.paymentMethod === 'card') range.card += sum;
-      else if (row.paymentMethod === 'online') range.online += sum;
-      else range.other += sum;
-    }
 
     const recent = await this.baseQuery(storeId, { userId })
       .take(10)

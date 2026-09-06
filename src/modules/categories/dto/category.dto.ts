@@ -1,5 +1,9 @@
-import { IsInt, IsNotEmpty, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsNotEmpty, IsOptional, IsString, Min } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+
+const SKIP_KITCHEN_DESCRIPTION =
+  'Restaurant only: lines from this category are served from the counter and never sent ' +
+  'to the kitchen. Categories named Drinks/Beverages skip it automatically.';
 
 export class CreateCategoryDto {
   @ApiProperty({ example: 'Electronics', description: 'Category name' })
@@ -26,6 +30,15 @@ export class CreateCategoryDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  /**
+   * MUST be declared: the global ValidationPipe runs with `whitelist: true`,
+   * so an undeclared field is silently dropped and the switch would never save.
+   */
+  @ApiProperty({ example: false, required: false, description: SKIP_KITCHEN_DESCRIPTION })
+  @IsOptional()
+  @IsBoolean()
+  skipKitchen?: boolean;
 }
 
 export class UpdateCategoryDto {
@@ -49,4 +62,9 @@ export class UpdateCategoryDto {
   @IsInt()
   @Min(0)
   sortOrder?: number;
+
+  @ApiProperty({ example: false, required: false, description: SKIP_KITCHEN_DESCRIPTION })
+  @IsOptional()
+  @IsBoolean()
+  skipKitchen?: boolean;
 }

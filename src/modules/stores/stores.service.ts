@@ -25,8 +25,15 @@ export const UPLOAD_DIR =
 
 export const LOGO_DIR = join(UPLOAD_DIR, 'logo');
 
-/** Public path prefix; mirrored by useStaticAssets() in main.ts. */
+/**
+ * Where logos USED to be served from (static files under main.ts's
+ * useStaticAssets). Kept only so a pre-migration row can be recognised and
+ * its orphaned file removed.
+ */
 const LOGO_URL_PREFIX = '/uploads/logo/';
+
+/** Where logos are served from now: `/stores/:id/logo`, by StoreLogoController. */
+const LOGO_ROUTE_PREFIX = '/stores/';
 
 const LOGO_EXTENSIONS: Record<string, string> = {
   'image/png': '.png',
@@ -167,11 +174,14 @@ export class StoresService {
   }
 
   /**
-   * Stores a tenant logo on disk and points the store row at it.
+   * Stores a tenant logo in the database and points the store row at the
+   * endpoint that serves it.
    *
-   * Written to disk rather than the database: a base64 column would be read on
-   * every `GET /stores/:id` (which both clients call to build receipt headers)
-   * and inflate every one of those responses by ~700 KB.
+   * In the DATABASE, not on disk: production runs on a container whose
+   * filesystem is recreated on every deploy, so a logo written to `uploads/`
+   * disappeared at the next release while `logoUrl` kept pointing at it. The
+   * bytes sit in a `select: false` column, so the ~500 KB never rides along
+   * on the ordinary `GET /stores/:id` both clients call for receipt headers.
    */
   async saveLogo(id: string, file: UploadedLogo) {
     const store = await this.storesRepository.findOne({ where: { id } });
@@ -179,27 +189,23 @@ export class StoresService {
       throw new BadRequestException(`Store with ID ${id} not found`);
     }
 
-    const extension = LOGO_EXTENSIONS[file.mimetype];
-    if (!extension) {
+    if (!LOGO_EXTENSIONS[file.mimetype]) {
       throw new BadRequestException('Logo must be a PNG, JPEG or WebP image');
     }
 
-    await fs.mkdir(LOGO_DIR, { recursive: true });
-
-    // Timestamped so a replacement gets a new URL — a stable filename would be
-    // served stale from the browser and CDN caches for as long as maxAge says.
-    const filename = `${id}-${Date.now()}${extension}`;
-    await fs.writeFile(join(LOGO_DIR, filename), file.buffer);
-
     const previous = store.logoUrl;
-    store.logoUrl = LOGO_URL_PREFIX + filename;
+    store.logoData = file.buffer;
+    store.logoMimeType = file.mimetype;
+    // Versioned so a replacement gets a new URL — a stable one would be served
+    // stale from the browser cache for as long as the endpoint's max-age says.
+    store.logoUrl = `${LOGO_ROUTE_PREFIX}${id}/logo?v=${Date.now()}`;
     const saved = await this.storesRepository.save(store);
 
-    // Only after the row points at the new file, so a failed unlink cannot
-    // leave the store referencing a logo that is gone.
+    // A logo from before the move lived on disk; tidy it up once the row no
+    // longer refers to it. Harmless when the file is already gone.
     await this.removeLogoFile(previous);
 
-    return saved;
+    return this.present(saved);
   }
 
   async removeLogo(id: string) {
@@ -210,10 +216,40 @@ export class StoresService {
 
     const previous = store.logoUrl;
     store.logoUrl = null;
+    store.logoData = null;
+    store.logoMimeType = null;
     const saved = await this.storesRepository.save(store);
     await this.removeLogoFile(previous);
 
-    return saved;
+    return this.present(saved);
+  }
+
+  /**
+   * The logo bytes for GET /stores/:id/logo. Null when the store has none —
+   * including a store whose row still points at a pre-migration disk file
+   * that no longer exists.
+   */
+  async readLogo(id: string): Promise<{ data: Buffer; mimeType: string } | null> {
+    const store = await this.storesRepository
+      .createQueryBuilder('store')
+      .select(['store.id', 'store.logoMimeType'])
+      // Deliberately selected: the column is `select: false` everywhere else.
+      .addSelect('store.logoData')
+      .where('store.id = :id', { id })
+      .getOne();
+
+    if (!store?.logoData || !store.logoMimeType) return null;
+    return { data: store.logoData, mimeType: store.logoMimeType };
+  }
+
+  /**
+   * The store as the settings screen wants it back after a logo change.
+   * `save()` returns the entity WITH the bytes it was just given, and that is
+   * exactly what must not go over the wire.
+   */
+  private present(store: Store): Store {
+    const { logoData, ...rest } = store;
+    return rest as Store;
   }
 
   /**

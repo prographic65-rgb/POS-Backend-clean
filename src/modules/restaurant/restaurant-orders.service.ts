@@ -3,7 +3,6 @@ import {
   BadRequestException,
   NotFoundException,
   ConflictException,
-  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
@@ -11,7 +10,6 @@ import { randomUUID } from 'crypto';
 import {
   Order,
   OrderItem,
-  OrderType,
   Product,
   RestaurantTable,
   RestaurantOrderStatus,
@@ -20,6 +18,7 @@ import {
 import {
   AddOrderItemsDto,
   CreateRestaurantOrderDto,
+  PrintBillDto,
   RestaurantOrderItemDto,
   SettleOrderDto,
   UpdateDraftOrderDto,
@@ -31,19 +30,24 @@ import { RealtimeGateway, RealtimeEvents } from '../../realtime/realtime.gateway
 import { generateOrderNumber } from '../../common/order-number';
 import { resolveDiscount, round2 } from '../../common/discount';
 import { toPage, type Page } from '../../common/pagination';
+import { categorySkipsKitchen, kitchenLines } from '../../common/kitchen-routing';
+import {
+  assertCanActOnBill,
+  BillViewer,
+  initialStatus,
+  isOwnerRole,
+  needsTable,
+  resolveOrderType,
+  resolvePayment,
+  statusAfterRound,
+} from './order-rules';
 
 /**
- * Order types that sit at a table.
- *
- * `dine_out` is a dine-in order that also takes a parcel home, so it claims a
- * table exactly like `dine_in`. Every table-related branch below routes through
- * this rather than comparing to 'dine_in' directly — those comparisons used to
- * be scattered, and the two that null out `tableId` would silently strand a
- * dine_out order's table.
+ * Who is asking. Threaded through the reads so a cashier's list can exclude
+ * bills another cashier has claimed, and through the writes so the claim can
+ * be enforced. Owners see and may do everything.
  */
-function needsTable(orderType?: OrderType | string | null): boolean {
-  return orderType === 'dine_in' || orderType === 'dine_out';
-}
+export type OrderViewer = BillViewer;
 
 /**
  * Legal kitchen transitions.
@@ -83,6 +87,11 @@ function rethrowTableConflict(error: any): never {
  * carry no stock (defaulting to 0), so every restaurant order would fail
  * through that path. Adding a branch there is also how the general flow would
  * get regressed, so that file is left untouched.
+ *
+ * The pure decisions — which lines the kitchen cooks, dine-in versus
+ * dine-out, who may touch a printed bill — live in order-rules.ts and
+ * common/kitchen-routing.ts, where they are unit-tested. This file owns the
+ * transactions and the events.
  */
 @Injectable()
 export class RestaurantOrdersService {
@@ -109,7 +118,9 @@ export class RestaurantOrdersService {
       tableId?: string;
       search?: string;
       shiftId?: string;
+      billPrinted?: string;
     } = {},
+    viewer?: OrderViewer,
   ) {
     const qb = this.ordersRepository
       .createQueryBuilder('order')
@@ -127,6 +138,8 @@ export class RestaurantOrdersService {
       .addSelect(['createdBy.id', 'createdBy.name'])
       .leftJoin('order.settledBy', 'settledBy')
       .addSelect(['settledBy.id', 'settledBy.name'])
+      .leftJoin('order.billPrintedBy', 'billPrintedBy')
+      .addSelect(['billPrintedBy.id', 'billPrintedBy.name'])
       .where('order.storeId = :storeId', { storeId })
       // Excludes every general-mode order, which all carry 'none'.
       .andWhere("order.orderStatus <> 'none'")
@@ -171,6 +184,26 @@ export class RestaurantOrdersService {
     if (filters.shiftId) {
       qb.andWhere('order.shiftId = :shiftId', { shiftId: filters.shiftId });
     }
+    if (filters.billPrinted === 'true') {
+      qb.andWhere('order.billPrintedAt IS NOT NULL');
+    } else if (filters.billPrinted === 'false') {
+      qb.andWhere('order.billPrintedAt IS NULL');
+    }
+
+    /**
+     * A printed bill belongs to the cashier who printed it.
+     *
+     * Every cashier sees every open order right up to the moment one of them
+     * prints its bill; from then on it appears only on that cashier's till,
+     * so two tills cannot both collect for the same table. Owners see all —
+     * they are the ones who step in when that cashier has gone home.
+     */
+    if (viewer && !isOwnerRole(viewer.role) && viewer.role === 'cashier') {
+      qb.andWhere(
+        '(order.billPrintedById IS NULL OR order.billPrintedById = :viewerId)',
+        { viewerId: viewer.userId },
+      );
+    }
 
     /**
      * Server-side search across the fields the order list actually shows.
@@ -205,9 +238,11 @@ export class RestaurantOrdersService {
       orderType?: string;
       tableId?: string;
       shiftId?: string;
+      billPrinted?: string;
     } = {},
+    viewer?: OrderViewer,
   ) {
-    return (await this.baseQuery(storeId, filters).getMany()).map((o) => this.present(o));
+    return (await this.baseQuery(storeId, filters, viewer).getMany()).map((o) => this.present(o));
   }
 
   /**
@@ -226,10 +261,12 @@ export class RestaurantOrdersService {
       tableId?: string;
       search?: string;
       shiftId?: string;
+      billPrinted?: string;
     } = {},
     paging: { skip: number; take: number },
+    viewer?: OrderViewer,
   ): Promise<Page<any>> {
-    const [rows, total] = await this.baseQuery(storeId, filters)
+    const [rows, total] = await this.baseQuery(storeId, filters, viewer)
       .skip(paging.skip)
       .take(paging.take)
       .getManyAndCount();
@@ -237,10 +274,12 @@ export class RestaurantOrdersService {
     return toPage(rows.map((o) => this.present(o)), total, paging.skip, paging.take);
   }
 
-  async findOne(id: string, storeId: string) {
+  async findOne(id: string, storeId: string, viewer?: OrderViewer) {
     // Uses the query builder rather than `relations`, which would select every
     // column of the joined users — including passwordHash.
-    const order = await this.baseQuery(storeId).andWhere('order.id = :id', { id }).getOne();
+    const order = await this.baseQuery(storeId, {}, viewer)
+      .andWhere('order.id = :id', { id })
+      .getOne();
 
     if (!order || order.orderStatus === 'none') {
       throw new NotFoundException('Order not found');
@@ -262,6 +301,18 @@ export class RestaurantOrdersService {
       waiterName: (order as any).createdBy?.name ?? null,
       /** Who took the money. Null on unpaid orders and on historical rows. */
       settledByName: (order as any).settledBy?.name ?? null,
+      /** The bill has been printed and is waiting to be paid. */
+      billPrinted: !!order.billPrintedAt,
+      billPrintedByName: (order as any).billPrintedBy?.name ?? null,
+      /** How a partial payment was split; null for a single method. */
+      paymentSplit:
+        order.paymentMethod === 'partial'
+          ? {
+              cash: Number(order.paidCash) || 0,
+              card: Number(order.paidCard) || 0,
+              online: Number(order.paidOnline) || 0,
+            }
+          : null,
       tableName: (order as any).table?.name ?? null,
     };
   }
@@ -270,11 +321,7 @@ export class RestaurantOrdersService {
 
   async create(storeId: string, userId: string, dto: CreateRestaurantOrderDto) {
     if (needsTable(dto.orderType) && !dto.tableId) {
-      throw new BadRequestException(
-        dto.orderType === 'dine_out'
-          ? 'A dine-out order is eaten at a table too — pick one'
-          : 'A dine-in order needs a table',
-      );
+      throw new BadRequestException('A dine-in order needs a table');
     }
     if (dto.orderType === 'delivery' && !dto.deliveryAddress?.trim()) {
       throw new BadRequestException('A delivery order needs an address');
@@ -288,6 +335,11 @@ export class RestaurantOrdersService {
     const lines = await this.buildItems(storeId, dto.items, isDraft ? null : now);
     const subtotal = round2(lines.reduce((sum, l) => sum + Number(l.total), 0));
 
+    // Derived, not trusted: a parcel on any line makes it a dine-out.
+    const orderType = resolveOrderType(dto.orderType, lines);
+    // A drinks-only order has nothing for the kitchen and opens ready to bill.
+    const orderStatus: RestaurantOrderStatus = isDraft ? 'draft' : initialStatus(lines);
+
     // The id is generated up-front so the table can be claimed BEFORE the
     // order is inserted. Claiming afterwards let the partial unique index on
     // (tableId WHERE orderStatus IN ('requested','preparing')) reject the
@@ -298,7 +350,7 @@ export class RestaurantOrdersService {
     // One transaction covering the table claim and the order insert — the
     // first in this codebase. Events are emitted only after it commits.
     const saved = await this.dataSource.transaction(async (manager) => {
-      if (!isDraft && needsTable(dto.orderType)) {
+      if (!isDraft && needsTable(orderType)) {
         const won = await this.tablesService.tryReserve(
           manager,
           dto.tableId,
@@ -320,11 +372,11 @@ export class RestaurantOrdersService {
         orderNumber: generateOrderNumber(),
         orderSequence,
         createdById: userId,
-        orderType: dto.orderType,
-        orderStatus: (isDraft ? 'draft' : 'requested') as RestaurantOrderStatus,
+        orderType,
+        orderStatus,
         // 'draft' is not a member of the payment enum; a draft is simply unpaid.
         status: 'unpaid',
-        tableId: needsTable(dto.orderType) ? dto.tableId : null,
+        tableId: needsTable(orderType) ? dto.tableId : null,
         customerName: dto.customerName ?? null,
         customerPhone: dto.customerPhone ?? null,
         deliveryAddress: dto.deliveryAddress ?? null,
@@ -344,6 +396,8 @@ export class RestaurantOrdersService {
     if (isDraft) {
       this.realtime.emitToStore(storeId, RealtimeEvents.draftUpdated, order);
     } else {
+      // The kitchen screens ignore this when the order carries no kitchen
+      // lines; the cashier and waiter screens still need it.
       this.realtime.emitToStore(storeId, RealtimeEvents.orderCreated, order);
       if (order.tableId) await this.emitTable(storeId, order.tableId);
     }
@@ -375,6 +429,8 @@ export class RestaurantOrdersService {
       await manager.update(Order, id, {
         tableId: dto.tableId ?? existing.tableId,
         notes: dto.notes ?? existing.notes,
+        // The parcel marks may have changed, and with them dine-in/dine-out.
+        orderType: resolveOrderType(existing.orderType, lines),
         subtotal,
         total: subtotal,
       });
@@ -386,13 +442,46 @@ export class RestaurantOrdersService {
   }
 
   /**
+   * Throws a draft away.
+   *
+   * Drafts are scratch: no table was reserved and no money moved, so the row
+   * and its lines are deleted outright rather than kept as a "cancelled"
+   * order cluttering the history. Anything already sent to the kitchen is
+   * refused — that is the cashier's cancel, which frees the table and keeps
+   * the record.
+   */
+  async discardDraft(id: string, storeId: string) {
+    const existing = await this.ordersRepository.findOne({ where: { id, storeId } });
+    if (!existing || existing.orderStatus === 'none') {
+      throw new NotFoundException('Order not found');
+    }
+    if (existing.orderStatus !== 'draft') {
+      throw new ConflictException(
+        'Only a draft can be discarded — this order has already been sent to the kitchen',
+      );
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(OrderItem, { orderId: id });
+      await manager.delete(Order, { id });
+    });
+
+    // Every waiter's draft list drops it; the payload only needs the id.
+    this.realtime.emitToStore(storeId, RealtimeEvents.draftUpdated, { id, discarded: true });
+    return { id, discarded: true };
+  }
+
+  /**
    * Sends a draft to the kitchen, claiming its table on the way.
    *
    * On a lost race the draft is preserved exactly as it was so the waiter can
    * retry against a different table — never silently discarded.
    */
   async punchDraft(id: string, storeId: string, tableId?: string) {
-    const existing = await this.ordersRepository.findOne({ where: { id, storeId } });
+    const existing = await this.ordersRepository.findOne({
+      where: { id, storeId },
+      relations: ['items'],
+    });
     if (!existing) throw new NotFoundException('Order not found');
     if (existing.orderStatus !== 'draft') {
       throw new ConflictException('This order has already been sent');
@@ -402,6 +491,8 @@ export class RestaurantOrdersService {
     if (needsTable(existing.orderType) && !targetTable) {
       throw new BadRequestException('Pick a table before sending this order');
     }
+
+    const lines = existing.items ?? [];
 
     await this.dataSource.transaction(async (manager) => {
       if (needsTable(existing.orderType)) {
@@ -414,7 +505,9 @@ export class RestaurantOrdersService {
       }
 
       await manager.update(Order, id, {
-        orderStatus: 'requested',
+        // Drinks only: nothing to cook, so it opens ready to bill.
+        orderStatus: initialStatus(lines),
+        orderType: resolveOrderType(existing.orderType, lines),
         tableId: needsTable(existing.orderType) ? targetTable : null,
       });
       // Stamp the round so the kitchen ticket knows which lines are new.
@@ -431,7 +524,11 @@ export class RestaurantOrdersService {
    * Appends a further round to a live order.
    *
    * The new lines get their own `sentAt`, so the kitchen prints a ticket
-   * containing only them rather than reprinting the whole order.
+   * containing only them rather than reprinting the whole order. Lines the
+   * kitchen does not cook (drinks) are stamped too — they are part of the
+   * round for billing — but they never reach the kitchen: the ticket event
+   * carries only the cookable lines, and a round made of nothing else raises
+   * no ticket at all.
    */
   async addItems(id: string, storeId: string, dto: AddOrderItemsDto) {
     const existing = await this.ordersRepository.findOne({ where: { id, storeId } });
@@ -445,14 +542,23 @@ export class RestaurantOrdersService {
 
     const sentAt = new Date();
     const lines = await this.buildItems(storeId, dto.items, sentAt);
+    const newKitchenLines = kitchenLines(lines);
 
     /**
      * A round added after the kitchen already handed the order over has to put
      * it back on the kitchen board — which only shows requested/preparing. Left
      * as `handed_over`, the new lines would print a ticket nobody is looking at
-     * and the food would never be made.
+     * and the food would never be made. A round of drinks alone does not.
      */
-    const reopensKitchen = existing.orderStatus === 'handed_over';
+    const nextStatus = statusAfterRound(existing.orderStatus, lines);
+    const reopensKitchen = nextStatus !== existing.orderStatus;
+
+    /**
+     * A printed bill no longer matches the order, so the claim is released:
+     * the order goes back in front of every cashier and whoever bills it next
+     * prints a fresh one. The discount fixed at print time goes with it.
+     */
+    const billWasPrinted = !!existing.billPrintedAt;
 
     await this.dataSource.transaction(async (manager) => {
       await manager.save(
@@ -461,28 +567,44 @@ export class RestaurantOrdersService {
 
       const all = await manager.find(OrderItem, { where: { orderId: id } });
       const subtotal = round2(all.reduce((sum, l) => sum + Number(l.total), 0));
-      const discount = Number(existing.discount) || 0;
+      const discount = billWasPrinted ? 0 : Number(existing.discount) || 0;
 
       await manager.update(Order, id, {
         subtotal,
         total: round2(Math.max(subtotal - discount, 0)),
-        ...(reopensKitchen ? { orderStatus: 'requested' as RestaurantOrderStatus } : {}),
+        // A parcel in this round can turn a dine-in into a dine-out.
+        orderType: resolveOrderType(existing.orderType, all),
+        ...(reopensKitchen ? { orderStatus: nextStatus } : {}),
+        ...(billWasPrinted
+          ? {
+              billPrintedById: null,
+              billPrintedAt: null,
+              discount: 0,
+              discountType: null,
+              discountValue: null,
+            }
+          : {}),
       });
     });
 
     const order = await this.findOne(id, storeId);
-    // The kitchen needs to know WHICH lines are new, so send them explicitly.
-    this.realtime.emitToStore(storeId, RealtimeEvents.orderItemsAdded, {
-      order,
-      newItems: order.items.filter(
-        (i) => i.sentAt && new Date(i.sentAt).getTime() === sentAt.getTime(),
-      ),
-    });
-    // The status moved, so screens that filter on it (the cashier's list, the
-    // waiter's live orders) need to re-place this order.
-    if (reopensKitchen) {
-      this.realtime.emitToStore(storeId, RealtimeEvents.orderUpdated, order);
+
+    // The kitchen needs to know WHICH lines are new, so send them explicitly —
+    // and only the ones it cooks. No cookable line, no ticket.
+    if (newKitchenLines.length) {
+      this.realtime.emitToStore(storeId, RealtimeEvents.orderItemsAdded, {
+        order,
+        newItems: order.items.filter(
+          (i) =>
+            !i.skipKitchen &&
+            i.sentAt &&
+            new Date(i.sentAt).getTime() === sentAt.getTime(),
+        ),
+      });
     }
+    // Totals, type, status and the bill claim may all have moved, so every
+    // screen that lists this order re-places it.
+    this.realtime.emitToStore(storeId, RealtimeEvents.orderUpdated, order);
     return order;
   }
 
@@ -527,25 +649,74 @@ export class RestaurantOrdersService {
   }
 
   /**
-   * Cashier settles: applies the discount, marks it paid, completes it, frees
-   * the table, and stamps the money onto the settling cashier's open shift.
+   * Cashier prints the bill: fixes the discount, records who printed it and
+   * when, and — on a delivery — who is carrying it. Nothing is paid yet and
+   * the table stays taken; that is settle()'s job.
    *
-   * Settling is allowed from any live status — requested, preparing or
-   * handed_over — because guests sometimes pay before the last dish lands.
-   * `handed_over` is merely the state the cashier's screen highlights as
-   * ready to bill.
+   * Allowed from any live kitchen status, because a takeaway or delivery is
+   * billed the moment it is ordered, long before the kitchen is done. The
+   * first cashier to print claims the order (see order-rules.ts); printing
+   * again is a reprint, which is how the discount gets changed.
+   */
+  async printBill(id: string, storeId: string, dto: PrintBillDto, viewer: OrderViewer) {
+    const existing = await this.loadForBilling(id, storeId);
+
+    if (existing.orderStatus === 'draft') {
+      throw new ConflictException('Send this order to the kitchen before printing its bill');
+    }
+    if (existing.orderStatus === 'completed') {
+      throw new ConflictException('This order is already settled');
+    }
+    if (existing.orderStatus === 'cancelled') {
+      throw new ConflictException('This order was cancelled');
+    }
+    assertCanActOnBill(existing, viewer);
+
+    const riderName = dto.riderName?.trim() || existing.riderName || null;
+    if (existing.orderType === 'delivery' && !riderName) {
+      throw new BadRequestException("A delivery bill needs the rider's name");
+    }
+
+    const subtotal = round2(
+      (existing.items ?? []).reduce((sum, l) => sum + Number(l.total), 0),
+    );
+    // Recomputed and clamped server-side — never trusted from the client.
+    const { discount, discountType, discountValue } = resolveDiscount(dto, subtotal);
+    const total = round2(Math.max(subtotal - discount, 0));
+
+    await this.ordersRepository.update(id, {
+      subtotal,
+      discount,
+      discountType,
+      discountValue,
+      total,
+      riderName: existing.orderType === 'delivery' ? riderName : existing.riderName ?? null,
+      billPrintedById: viewer.userId,
+      billPrintedAt: new Date(),
+    });
+
+    const order = await this.findOne(id, storeId);
+    // Other tills drop this order from their lists; this one keeps it.
+    this.realtime.emitToStore(storeId, RealtimeEvents.orderUpdated, order);
+    return order;
+  }
+
+  /**
+   * Cashier settles: marks the printed bill paid, completes it, frees the
+   * table, and stamps the money onto the settling cashier's open shift.
+   *
+   * The bill must have been printed first, by this same cashier (an owner may
+   * step in). What is charged is what was printed: the discount fixed by
+   * printBill(). The DTO's discount fields are honoured only for older
+   * clients that still send them — a client built for the two-step flow
+   * omits them.
    *
    * `userId` is who took the money. Note this is NOT `createdById`: that is
    * the waiter, who never handles cash.
    */
-  async settle(id: string, storeId: string, dto: SettleOrderDto, userId: string) {
-    const existing = await this.ordersRepository.findOne({
-      where: { id, storeId },
-      relations: ['items'],
-    });
-    if (!existing || existing.orderStatus === 'none') {
-      throw new NotFoundException('Order not found');
-    }
+  async settle(id: string, storeId: string, dto: SettleOrderDto, viewer: OrderViewer) {
+    const existing = await this.loadForBilling(id, storeId);
+
     if (existing.orderStatus === 'draft') {
       throw new ConflictException('Send this order to the kitchen before settling it');
     }
@@ -555,14 +726,28 @@ export class RestaurantOrdersService {
     if (existing.orderStatus === 'cancelled') {
       throw new ConflictException('This order was cancelled');
     }
+    if (!existing.billPrintedAt) {
+      throw new ConflictException('Print the bill before marking this order paid');
+    }
+    assertCanActOnBill(existing, viewer);
 
     const subtotal = round2(
       (existing.items ?? []).reduce((sum, l) => sum + Number(l.total), 0),
     );
 
-    // Recomputed and clamped server-side — never trusted from the client.
-    const { discount, discountType, discountValue } = resolveDiscount(dto, subtotal);
+    // The printed figure, unless an older one-step client sent its own.
+    const sentDiscount = dto.discountType !== undefined || dto.discountValue !== undefined;
+    const { discount, discountType, discountValue } = resolveDiscount(
+      sentDiscount
+        ? dto
+        : { discountType: existing.discountType, discountValue: existing.discountValue },
+      subtotal,
+    );
     const total = round2(Math.max(subtotal - discount, 0));
+
+    // Validated BEFORE the transaction: a split that does not balance is the
+    // cashier's typo, and must not cost a shift-row lock to find out.
+    const payment = resolvePayment(dto.paymentMethod, dto.split, total);
 
     // Tenants with shifts switched on require an open drawer; the rest simply
     // record who settled, so turning the flag on later has history to show.
@@ -575,14 +760,14 @@ export class RestaurantOrdersService {
        * takes FOR UPDATE, so it waits here until this payment commits rather
        * than snapshotting totals that are about to change.
        */
-      const stamp = await this.shiftsService.stampSettlement(manager, storeId, userId, {
+      const stamp = await this.shiftsService.stampSettlement(manager, storeId, viewer.userId, {
         enforce: enforceShift,
       });
 
       await manager.update(Order, id, {
         orderStatus: 'completed',
         status: 'paid',
-        paymentMethod: (dto.paymentMethod as any) ?? 'cash',
+        ...payment,
         subtotal,
         discount,
         discountType,
@@ -602,15 +787,16 @@ export class RestaurantOrdersService {
     return order;
   }
 
-  /** Cashier or owner cancels. The kitchen deliberately cannot. */
-  async cancel(id: string, storeId: string) {
-    const existing = await this.ordersRepository.findOne({ where: { id, storeId } });
-    if (!existing || existing.orderStatus === 'none') {
-      throw new NotFoundException('Order not found');
-    }
+  /**
+   * Cashier or owner cancels. The kitchen deliberately cannot, and a cashier
+   * cannot cancel a bill another cashier has printed.
+   */
+  async cancel(id: string, storeId: string, viewer: OrderViewer) {
+    const existing = await this.loadForBilling(id, storeId);
     if (existing.orderStatus === 'completed') {
       throw new ConflictException('A settled order cannot be cancelled');
     }
+    assertCanActOnBill(existing, viewer);
 
     await this.dataSource.transaction(async (manager) => {
       await manager.update(Order, id, { orderStatus: 'cancelled', status: 'cancelled' });
@@ -628,12 +814,36 @@ export class RestaurantOrdersService {
   // --------------------------------------------------------------- helpers
 
   /**
+   * The order with its lines and the cashier who printed its bill — enough to
+   * check the claim and name the other cashier in a refusal.
+   */
+  private async loadForBilling(id: string, storeId: string): Promise<Order> {
+    const existing = await this.ordersRepository
+      .createQueryBuilder('order')
+      .leftJoinAndSelect('order.items', 'items')
+      .leftJoin('order.billPrintedBy', 'billPrintedBy')
+      .addSelect(['billPrintedBy.id', 'billPrintedBy.name'])
+      .where('order.id = :id', { id })
+      .andWhere('order.storeId = :storeId', { storeId })
+      .getOne();
+
+    if (!existing || existing.orderStatus === 'none') {
+      throw new NotFoundException('Order not found');
+    }
+    return existing;
+  }
+
+  /**
    * Resolves products and snapshots price AND cost onto each line.
    *
    * Snapshotting `unitCost` is what keeps profit honest: reading it from the
    * live product later would silently rewrite the margin on every past order
    * whenever someone edits a cost. No stock is read or deducted — restaurant
    * products do not track stock.
+   *
+   * Whether the kitchen cooks the line is snapshotted for the same reason:
+   * it is decided by the product's category NOW, and the ticket the kitchen
+   * printed must not change meaning when a category is re-flagged later.
    */
   private async buildItems(
     storeId: string,
@@ -643,6 +853,7 @@ export class RestaurantOrdersService {
     const ids = [...new Set(items.map((i) => i.productId))];
     const products = await this.productsRepository.find({
       where: { id: In(ids), storeId },
+      relations: ['category'],
     });
     const byId = new Map(products.map((p) => [p.id, p]));
 
@@ -672,9 +883,10 @@ export class RestaurantOrdersService {
         discount: 0,
         total: lineTotal,
         notes: item.notes?.trim() || null,
-        // Marks a line to be packed on a dine_out order. Harmless elsewhere:
-        // a takeaway order is entirely parcel, so nothing flags it per line.
+        // Marks a line to be packed on a seated order. Harmless elsewhere: a
+        // takeaway order is entirely parcel, so nothing flags it per line.
         isParcel: !!item.isParcel,
+        skipKitchen: categorySkipsKitchen(product.category),
         sentAt,
       };
     });
