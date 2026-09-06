@@ -37,14 +37,26 @@ export interface ShiftTotals {
  * method puts its full total in one bucket, which also covers rows written
  * before the split columns existed. 'check' and a legacy NULL land in
  * `other`: not cash, so never handed over as notes, but still takings.
+ *
+ * Every column is written as a fully quoted `"order"."column"`, never as
+ * `order.column`. The builder's alias is `order`, a reserved word, so it MUST
+ * be quoted — and TypeORM's own rewrite of `alias.property` into a quoted
+ * pair cannot be relied on inside a multi-line fragment: its regex captures
+ * the property name as "anything but space, =, ( ) or ,", which swallows a
+ * trailing newline, so `order.paidCash⏎` was looked up as "paidCash\n",
+ * matched nothing, and went to Postgres verbatim. Result: "syntax error at or
+ * near order" on GET /shifts/current, /shifts/me/dashboard and the tail of
+ * POST /shifts/open (row inserted, then the response 500ed) — which is how a
+ * cashier came to see "shift not open" and "you already have an open shift"
+ * at the same time.
  */
 async function sumByMethod(
   qb: SelectQueryBuilder<Order>,
 ): Promise<{ cash: number; card: number; online: number; other: number; count: number }> {
   const bucket = (method: 'cash' | 'card' | 'online', column: string) =>
     `COALESCE(SUM(CASE
-        WHEN order.paymentMethod = 'partial' THEN order.${column}
-        WHEN order.paymentMethod = '${method}' THEN order.total
+        WHEN "order"."paymentMethod" = 'partial' THEN "order"."${column}"
+        WHEN "order"."paymentMethod" = '${method}' THEN "order"."total"
         ELSE 0 END), 0)`;
 
   const row = await qb
@@ -53,11 +65,11 @@ async function sumByMethod(
     .addSelect(bucket('online', 'paidOnline'), 'online')
     .addSelect(
       `COALESCE(SUM(CASE
-          WHEN order.paymentMethod IN ('partial', 'cash', 'card', 'online') THEN 0
-          ELSE order.total END), 0)`,
+          WHEN "order"."paymentMethod" IN ('partial', 'cash', 'card', 'online') THEN 0
+          ELSE "order"."total" END), 0)`,
       'other',
     )
-    .addSelect('COUNT(order.id)', 'count')
+    .addSelect('COUNT("order"."id")', 'count')
     .getRawOne<{ cash: string; card: string; online: string; other: string; count: string }>();
 
   // Postgres returns SUM as a string and COUNT as a bigint string; both
