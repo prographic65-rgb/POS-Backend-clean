@@ -94,4 +94,19 @@ export class OrderItem {
    */
   @Column({ default: false })
   skipKitchen: boolean;
+
+  /**
+   * Name of the product's category when this line was created, printed in
+   * brackets after the dish on the kitchen ticket — "Chicken Karahi (Karahi)".
+   *
+   * Snapshotted for the same reason as `skipKitchen`: re-filing or renaming a
+   * category later must not rewrite what an old ticket said. NULL on lines
+   * written before the column existed and on retail lines, which never reach
+   * a kitchen; the ticket simply omits the bracket then.
+   *
+   * The explicit `type` matters: a `string | null` property reflects as
+   * Object, which TypeORM cannot map to a column.
+   */
+  @Column({ type: 'varchar', nullable: true })
+  categoryName?: string | null;
 }

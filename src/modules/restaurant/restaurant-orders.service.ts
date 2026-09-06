@@ -887,6 +887,8 @@ export class RestaurantOrdersService {
         // takeaway order is entirely parcel, so nothing flags it per line.
         isParcel: !!item.isParcel,
         skipKitchen: categorySkipsKitchen(product.category),
+        // The kitchen ticket prints this in brackets after the dish.
+        categoryName: product.category?.name ?? null,
         sentAt,
       };
     });
